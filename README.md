@@ -61,7 +61,7 @@ Wired to the real instance at `http://<owui-host>` (v0.11.1) as a
 **system-level** connection. The whole chain is proven on the wire:
 
 ```
-user JWT -> OWUI backend -> /api/v1/terminals/orch-lxc64/<path>
+user JWT -> OWUI backend -> /api/v1/terminals/<orch-connection-id>/<path>
          -> orchestrator (K1 + X-User-Id) -> per-user runner
 ```
 
@@ -84,7 +84,7 @@ curl -s -X POST -H "Authorization: Bearer $T" -H 'Content-Type: application/json
 curl -s -H "Authorization: Bearer $T" "$O/api/v1/configs/terminal_servers"
 # POST /api/v1/configs/terminal_servers with
 #   {"TERMINAL_SERVER_CONNECTIONS":[ ...existing..., {
-#      "id":"orch-lxc64","name":"Runner Orchestrator","enabled":true,
+#      "id":"<orch-connection-id>","name":"Runner Orchestrator","enabled":true,
 #      "url":"http://<orch-host>:8080","key":"<ORCH_API_KEY>",
 #      "auth_type":"bearer","server_type":"terminal","path":"/openapi.json",
 #      "config":{"access_grants":[]},"policy_id":null }]}
@@ -96,8 +96,8 @@ delete every other terminal server the instance has.
 ### Exercise it as a user
 
 ```bash
-curl -H "Authorization: Bearer $T" "$O/api/v1/terminals/orch-lxc64/system"
-curl -H "Authorization: Bearer $T" "$O/api/v1/terminals/orch-lxc64/files/list?path=."
+curl -H "Authorization: Bearer $T" "$O/api/v1/terminals/<orch-connection-id>/system"
+curl -H "Authorization: Bearer $T" "$O/api/v1/terminals/<orch-connection-id>/files/list?path=."
 ```
 
 OWUI's backend adds `X-User-Id` (and `X-Session-Id` when a chat is in scope)
@@ -130,8 +130,8 @@ measured on the wire, not inferred.
 
 | id | url | origin |
 |---|---|---|
-| `orch-lxc64` | `http://<orch-host>:8080` | created during the original integration — **URL now historical, see below** |
-| `lxc101-terminal` | `http://open-terminal:8000` | pre-existing, untouched |
+| `<orch-connection-id>` | `http://<orch-host>:8080` | created during the original integration — **URL now historical, see below** |
+| `<other-terminal-id>` | `http://open-terminal:8000` | pre-existing, untouched |
 
 > **Consolidated onto one host (ADR-0006).** The orchestrator no longer runs
 > on the original build host; that stack was torn down after its workspace volumes were
@@ -142,8 +142,8 @@ measured on the wire, not inferred.
 > address above is kept only so the original integration record still reads
 > correctly. The `id` is unchanged, so the route prefix below still applies.
 
-`orch-lxc64`'s stored key matches this repo's `.env` `ORCH_API_KEY`. The
-`lxc101-terminal` entry is a separate plain Open Terminal on the OWUI host and
+`<orch-connection-id>`'s stored key matches this repo's `.env` `ORCH_API_KEY`. The
+`<other-terminal-id>` entry is a separate plain Open Terminal on the OWUI host and
 has nothing to do with this stack — it is listed only so nobody deletes it.
 **`POST /api/v1/configs/terminal_servers` replaces the whole list**: read,
 append, write back.
@@ -182,7 +182,7 @@ implement.
 
 ### Chain proven live
 
-| Route (all via `/api/v1/terminals/orch-lxc64/…`) | Result |
+| Route (all via `/api/v1/terminals/<orch-connection-id>/…`) | Result |
 |---|---|
 | `GET /system` | 200, real runner prompt; **~6-7s cold start**, ~60ms warm |
 | `POST /execute` | exit 0, runs as `user` in `/home/user` |
