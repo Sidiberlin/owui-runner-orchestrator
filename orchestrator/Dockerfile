@@ -1,30 +1,49 @@
 # =============================================================================
 #  OWUI Runner Orchestrator — Lane B/C
+#  Base: zendis/python3:3.13-main (ticket 12 / D1). Unlike the runner, this
+#  image runs as a non-root USER from the start: it needs no capabilities at
+#  all (compose gives it cap_drop: ALL). It never sees the raw Docker socket
+#  either — all Docker access goes through the socket proxy over TCP (Q3/N2).
+#
+#  WHY THIS BASE (ticket 12, gated on M0 evidence)
+#    zendis/python3 is Nix-built and ships neither a working system pip nor
+#    ensurepip (both MEASURED broken — see m0-zends-probe.md). The verified
+#    bootstrap is a venv seeded by get-pip.py, not the base's own pip. The
+#    default USER is 53111:53111 and $HOME=/home/nonroot is the only writable
+#    place outside the venv target — /tmp is NOT writable under this uid.
+#    This swap only shipped after uvicorn serve-smoke + aiodocker import +
+#    the full test suite passed green inside this exact image (the gate); a
+#    failure there means keep python:3.12-slim, not ship it unproven.
 # =============================================================================
-#  Unlike the runner, this image runs as a non-root USER from the start: it
-#  needs no capabilities at all (compose gives it cap_drop: ALL). It never sees
-#  the raw Docker socket either — all Docker access goes through the socket
-#  proxy over TCP (Q3/N2).
-# =============================================================================
-FROM python:3.12-slim AS base
+FROM registry.opencode.de/oci-community/images/zendis/python3:3.13-main@sha256:bcc27cb47133b3863296808b10ec70417d94364bc6b096279f186d81c786cd2e AS base
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PIP_NO_CACHE_DIR=1
+    HOME=/home/nonroot \
+    PATH=/home/nonroot/venv/bin:/usr/bin:/bin
 
 WORKDIR /srv
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# System pip / ensurepip are broken on this base (M0). python3 -m venv
+# --without-pip + get-pip.py is the verified working route. wget is present;
+# curl is not (both measured).
+RUN set -eux; \
+    python3 -m venv --without-pip /home/nonroot/venv; \
+    wget -q https://bootstrap.pypa.io/get-pip.py -O /home/nonroot/get-pip.py; \
+    /home/nonroot/venv/bin/python /home/nonroot/get-pip.py; \
+    rm /home/nonroot/get-pip.py; \
+    /home/nonroot/venv/bin/pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
 
-# /data holds the workspace-size cache (N4). Compose bind-mounts over it; the
-# uid must match so the mount is writable.
-RUN useradd --system --uid 10001 --create-home --home-dir /home/orch orch \
- && mkdir -p /data \
- && chown -R orch:orch /srv /data
-USER orch
+# /data holds the workspace-size cache (N4); compose mounts a named volume
+# over it, which inherits this path's ownership. uid 53111 cannot mkdir at
+# the filesystem root (measured), so this one step runs as root and then
+# drops straight back — nothing else in this image ever runs as root.
+USER root
+RUN mkdir -p /data && chown -R 53111:53111 /data
+USER 53111:53111
 
 EXPOSE 8080
 
