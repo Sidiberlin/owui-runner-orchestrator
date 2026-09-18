@@ -132,6 +132,24 @@ services:
       start_period: 5s
 
   # ---------------------------------------------------------------------------
+  # Same root-owned-volume problem as devguard-cache-init, applied to the
+  # orchestrator's own state volume (ticket 12 review). The orchestrator has
+  # no capabilities and never runs as root (unlike the runner, which starts
+  # root and drops via gosu) - it cannot chown its own volume at startup, so
+  # a one-shot init container does it instead, exactly once, before the
+  # orchestrator is allowed to start. This is what actually survives a uid
+  # change across image upgrades; baking a chown into the image only helps a
+  # volume Docker creates empty and seeds from that exact image.
+  # ---------------------------------------------------------------------------
+  orchestrator-state-init:
+    image: registry.opencode.de/oci-community/images/zendis/coreutils:main@sha256:4168c1bbcb59f61711cf1e5a99abdb9634b35a22d1db0f49f927daf87c812da8
+    user: "0:0"
+    volumes:
+      - orch-state:/data
+    command: ["sh", "-c", "chown -R 53111:53111 /data && chmod 0750 /data"]
+    security_opt: [no-new-privileges, apparmor=unconfined]
+
+  # ---------------------------------------------------------------------------
   # Orchestrator (Lane B builds the image this points at).
   # `docker compose config` validates now; `up` works once orchestrator/ exists.
   # ---------------------------------------------------------------------------
@@ -143,6 +161,8 @@ services:
     depends_on:
       docker-socket-proxy:
         condition: service_healthy   # avoids racing the R4 startup image check
+      orchestrator-state-init:
+        condition: service_completed_successfully
     networks: [owui, control, runners]
     ports:
       # Consolidated on one host, OWUI reaches us over the `owui` network by
@@ -155,11 +175,15 @@ services:
       # own API rather than mounting everyone's files.
       #
       # A NAMED VOLUME, deliberately, not ./data. A host bind mount arrives
-      # root-owned and the orchestrator runs as uid 10001, so it could not write
-      # its own cache: usage was forgotten on every restart and the aggregate
-      # ceiling (R2) silently became unenforceable. A named volume seeds its
-      # ownership from the image path, which the Dockerfile already chowns.
-      # Same failure class as C5, except a bind mount gets no entrypoint chown.
+      # root-owned and the orchestrator runs as uid 53111 (ticket 12), so it
+      # could not write its own cache: usage was forgotten on every restart
+      # and the aggregate ceiling (R2) silently became unenforceable. Same
+      # failure class as C5, except a bind mount gets no chown at all.
+      # `orchestrator-state-init` below is what actually fixes ownership now
+      # (ticket 12 review: the image only chowns /data at BUILD time, which
+      # does nothing for a volume that already existed under the PREVIOUS
+      # image's uid 10001 - a named volume is not re-seeded from the image
+      # on every start, only when Docker creates it empty).
       - orch-state:/data
     security_opt:
       - no-new-privileges

@@ -5,14 +5,13 @@ re-seeded on a genuinely fresh volume.
 """
 import pytest
 
-from conftest import container_exists, runner_name_for, sh
+from conftest import container_exists, inspect, runner_name_for, sh
 
 pytestmark = pytest.mark.integration
 
 
 def _env_of(container: str) -> dict[str, str]:
-    out = sh("docker", "inspect", "-f",
-             "{{range .Config.Env}}{{println .}}{{end}}", container)
+    out = inspect(container, "{{range .Config.Env}}{{println .}}{{end}}")
     env: dict[str, str] = {}
     for line in out.splitlines():
         if "=" in line:
@@ -43,8 +42,11 @@ def test_agents_md_is_seeded_on_first_spawn(api, stack, uid, cleanup_runners):
 
 
 def test_cross_render_consistency_env_and_agents_md_agree(api, stack, uid, cleanup_runners):
-    """One renderer produces both (orchestrator/app/orientation.py) - this
-    is what proves they cannot drift, rather than merely hoping so."""
+    """One renderer produces both (orchestrator/app/orientation.py). This
+    test stack never enables DevGuard, so this only ever exercises the
+    empty-list case here (env empty, AGENTS.md says "none configured") -
+    unit/test_orientation.py proves the populated-list case directly
+    against the renderer, no live stack required."""
     cleanup_runners.append(uid)
     h = stack.user_headers(uid)
     assert api.get("/system", headers=h).status_code == 200

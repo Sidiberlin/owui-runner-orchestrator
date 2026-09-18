@@ -19,6 +19,7 @@ FROM registry.opencode.de/oci-community/images/zendis/python3:3.13-main@sha256:b
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
     HOME=/home/nonroot \
     PATH=/home/nonroot/venv/bin:/usr/bin:/bin
 
@@ -28,12 +29,20 @@ COPY requirements.txt .
 # System pip / ensurepip are broken on this base (M0). python3 -m venv
 # --without-pip + get-pip.py is the verified working route. wget is present;
 # curl is not (both measured).
+#
+# get-pip.py is unversioned (bootstrap.pypa.io always serves the current
+# bootstrapper, unlike a tagged release) - sha256-verify it the same way D2
+# required for the opencode installer: a rebuild fails loudly on a checksum
+# mismatch instead of silently trusting whatever the URL serves that day.
+# Re-pin deliberately when pypa legitimately rotates it.
+ARG GET_PIP_SHA256=fb24e693bab954209a063d90953621412ccad4a500905a726286e038f508ddf6
 RUN set -eux; \
     python3 -m venv --without-pip /home/nonroot/venv; \
     wget -q https://bootstrap.pypa.io/get-pip.py -O /home/nonroot/get-pip.py; \
+    echo "${GET_PIP_SHA256}  /home/nonroot/get-pip.py" | sha256sum -c -; \
     /home/nonroot/venv/bin/python /home/nonroot/get-pip.py; \
     rm /home/nonroot/get-pip.py; \
-    /home/nonroot/venv/bin/pip install --no-cache-dir -r requirements.txt
+    /home/nonroot/venv/bin/pip install -r requirements.txt
 
 COPY app ./app
 

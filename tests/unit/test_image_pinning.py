@@ -17,6 +17,19 @@ def _refs_from(path: str, pattern: re.Pattern) -> list[str]:
     return pattern.findall(text)
 
 
+_VAR_DEFAULT = re.compile(r"\$\{[A-Z_][A-Z0-9_]*:-([^}]*)\}")
+
+
+def _resolve_defaults(ref: str) -> str:
+    """`owui-orchestrator:${ORCH_TAG:-dev}` -> `owui-orchestrator:dev`. An
+    operator can still override the var at deploy time, but what THIS repo
+    commits as the default is exactly what R4 governs - checking the raw
+    `${VAR:-default}` text is not enough: it always contains a `:` (from
+    the interpolation syntax itself) regardless of what the default is, so
+    a `:latest` hidden inside the default would slip past a raw-text check."""
+    return _VAR_DEFAULT.sub(r"\1", ref)
+
+
 def _is_build_stage_alias(ref: str, known_stages: set[str]) -> bool:
     """`FROM base AS runtime` / `FROM ${OPEN_TERMINAL_REF} AS opencode` later
     referenced as `FROM opencode` is a build-stage name, not an image ref."""
@@ -26,9 +39,10 @@ def _is_build_stage_alias(ref: str, known_stages: set[str]) -> bool:
 def test_compose_image_refs_are_pinned_and_not_latest():
     refs = _refs_from("docker-compose.yml", _IMAGE_LINE)
     assert refs, "expected at least one image: line in docker-compose.yml"
-    for ref in refs:
-        assert not ref.endswith(":latest"), f"{ref} floats to :latest"
-        assert ":" in ref or "@" in ref, f"{ref} has no tag or digest at all"
+    for raw in refs:
+        ref = _resolve_defaults(raw)
+        assert not ref.endswith(":latest"), f"{raw} defaults to :latest"
+        assert ":" in ref or "@" in ref, f"{raw} has no tag or digest at all"
 
 
 def test_zends_refs_are_digest_pinned():
