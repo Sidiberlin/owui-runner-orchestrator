@@ -118,6 +118,17 @@ RUN set -eux; \
     npm --version; \
     python3 -m pip --version
 
+# Agent orientation shims (Workstream L, ticket 13): curl/wget/apt-get in
+# /usr/local/bin, PATH-first ahead of the real /usr/bin binaries and outside
+# the workspace volume, so they shadow the real thing for every session and
+# survive teardown. One script; the three names dispatch on argv[0].
+COPY shims/sandbox-shim.sh /usr/local/bin/sandbox-shim
+RUN set -eux; \
+    chmod 0755 /usr/local/bin/sandbox-shim; \
+    ln -s sandbox-shim /usr/local/bin/curl; \
+    ln -s sandbox-shim /usr/local/bin/wget; \
+    ln -s sandbox-shim /usr/local/bin/apt-get
+
 # The base image sets WorkingDir=/app (root-owned).  Without this the agent's
 # cwd is /app, so every RELATIVE-path write through /files/write fails with
 # "Permission denied: '/app/...'" while absolute paths work — a silent,

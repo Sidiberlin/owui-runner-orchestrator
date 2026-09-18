@@ -457,6 +457,54 @@ Bump `RUNNER_VERSION`. Reconciliation reaps every runner carrying the old
 version on the next restart instead of orphaning them. User workspaces are
 named volumes and survive.
 
+## What the agent sees
+
+The driving agent is the LLM in the OWUI chat, not a process inside the
+runner — it never sees a stack trace from in here, only what we put in its
+environment, its workspace, and its tool output. Without help, a model that
+hits a dead network call concludes "network bug" and burns a session
+debugging DNS. Four independent channels tell it otherwise:
+
+**Data — env vars, injected at every runner create:**
+
+```
+SANDBOX_MODE=air-gapped
+SANDBOX_EGRESS=BLOCKED
+SANDBOX_INTERNAL_SERVICES=devguard-api:8080=package proxy: pip/npm packages, malware-checked
+```
+
+`SANDBOX_INTERNAL_SERVICES` is `name:port=description` pairs, comma-joined,
+one entry per service actually reachable on this deployment — empty unless
+`DEVGUARD_ENABLED=true`. One renderer (`orchestrator/app/orientation.py`)
+produces this string and the AGENTS.md service list below from the same
+source, so the two cannot list different services.
+
+**Prose — `AGENTS.md`, seeded into the workspace root on first spawn, only
+if absent** (a user's own file, or one deeper in their project, is never
+touched — nothing auto-loads this one, it is a read-me-first artifact):
+states the sandbox is by design, that pip/npm already work through
+`$PIP_INDEX_URL`/`$NPM_CONFIG_REGISTRY`, and lists the same internal
+services as the env var above.
+
+**Enforcement — unchanged:** the `internal: true` runners network, no
+capabilities added. This is what actually makes egress impossible; the
+other three channels exist so the agent stops trying before it wastes a
+session finding that out the hard way.
+
+**Feedback — curl/wget/apt-get shims** in `/usr/local/bin` (PATH-first,
+outside the workspace volume, baked into the image): a call to an
+allowlisted internal `host:port` always gets the real binary's real
+response. Anything else — including `-x`/`--proxy`, which bypass the
+allowlist otherwise — gets a real failure and a short explanation on
+stderr, exit 126: instant (<100ms) when `SANDBOX_EGRESS=BLOCKED`, otherwise
+a real attempt with a 2-second budget first. Never a fake success, never
+mimicked output. `pip`/`npm` need no shim — they are already pointed at the
+internal mirror and cannot reach a public registry regardless.
+
+The orchestrator also DNS-checks every name in `SANDBOX_INTERNAL_SERVICES`
+against the runners network once at boot and logs a warning (never fails
+startup) if one does not resolve — config drift should be loud, not silent.
+
 ## Accepted risks
 
 These are known, deliberate, and **not** closed. Do not read the hardening

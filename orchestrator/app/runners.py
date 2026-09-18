@@ -43,7 +43,7 @@ from datetime import datetime, timezone
 
 import aiodocker
 
-from . import dockerapi, keys, labels as L, volumes
+from . import dockerapi, keys, labels as L, orientation, volumes
 from .config import Config
 from .quota import MonitorQuota, QuotaExceeded
 
@@ -152,6 +152,17 @@ class RunnerManager:
             )
         log.info("runner image %s present", self.cfg.runner_image)
         await self.reconcile()
+        # Ticket 04 Q3c: SANDBOX_INTERNAL_SERVICES is static config, checked
+        # once against reality at boot. Warn, never fail - a drifted name is
+        # an operator config problem, not a reason to refuse every runner.
+        drifted = await orientation.check_dns_drift(
+            orientation.sandbox_services(self.cfg)
+        )
+        if drifted:
+            log.warning(
+                "SANDBOX_INTERNAL_SERVICES lists unreachable name(s) on %s: %s",
+                self.cfg.runners_network, ", ".join(drifted),
+            )
 
     # --- reconciliation (A4) -----------------------------------------------
     async def reconcile(self) -> None:
@@ -414,6 +425,8 @@ class RunnerManager:
         # N9: OPEN_TERMINAL_ALLOWED_DOMAINS is deliberately never set. Setting
         # it activates the entrypoint's iptables firewall, which needs
         # CAP_NET_ADMIN we do not grant. `internal: true` is the real control.
+        # Agent orientation (Workstream L, ticket 13): the data channel.
+        env.update(orientation.sandbox_env(self.cfg))
         return [f"{k}={v}" for k, v in env.items()]
 
     async def _spawn(self, uid: str, nano_cpus: int, memory: int, role: str) -> Runner:
@@ -476,6 +489,14 @@ class RunnerManager:
         except Exception:
             await self._force_remove(container)
             raise
+
+        # Agent orientation (ticket 13): the prose channel. "Startup only if
+        # absent" (L1) - a fresh volume gets it seeded, an existing one (or a
+        # user's own edits) is left alone. Best effort; never blocks a spawn.
+        await orientation.seed_agents_md(
+            f"http://{name}:{self.cfg.runner_port}", key,
+            orientation.render_agents_md(orientation.sandbox_services(self.cfg)),
+        )
 
         data = await container.show()
         prior = self._tombstones.get(uid)
