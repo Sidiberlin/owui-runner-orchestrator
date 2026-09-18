@@ -49,26 +49,36 @@ def _package_seam() -> dict:
     DevGuard's /npm/:package/-/* route. Setting replace-registry-host=never in
     a runner would therefore break installs; nothing sets it.
 
-    pip is BROKEN and the URL is not the reason. The index resolves fine, but
-    DevGuard passes PyPI's simple index through unrewritten (ProxyPyPISimple
-    -> writeResponse, no rewriting on main either), so every href still points
-    at files.pythonhosted.org, pip does not rewrite hosts the way npm does,
-    and a zero-egress runner cannot resolve it. DevGuard does expose a working
-    /api/v1/dependency-proxy/pypi/packages/* route -- the index simply never
-    points at it. Until that gap is closed, PIP_INDEX_URL reaches the firewall
-    for metadata but no wheel can be downloaded.
+    pip needs a hop that npm does not, and the URL is not the reason. DevGuard
+    passes PyPI's simple index through unrewritten (ProxyPyPISimple ->
+    writeResponse, no rewriting on main either), so every link still points at
+    files.pythonhosted.org, which a zero-egress runner cannot resolve; pip
+    follows those links literally. So pip points at pip-shim (ADR-0010), which
+    rewrites the links onto DevGuard's own pypi/packages route. Traffic still
+    passes through devguard-api, so the firewall applies to index and download
+    alike.
+
+    DEVGUARD_BASE_URL therefore intentionally does NOT drive the pip default;
+    PIP_SHIM_BASE_URL does. Point PIP_INDEX_URL straight at DevGuard and
+    metadata will resolve while every download dies in DNS -- which is exactly
+    how this looked before it was measured.
     """
     enabled = os.getenv("DEVGUARD_ENABLED", "false").strip().lower() in (
         "1", "true", "yes", "on")
     base = os.getenv("DEVGUARD_BASE_URL", "http://devguard-api:8080").rstrip("/")
+    pip_base = os.getenv("PIP_SHIM_BASE_URL", "http://pip-shim:8080").rstrip("/")
     pip = os.getenv("PIP_INDEX_URL", "").strip()
     npm = os.getenv("NPM_CONFIG_REGISTRY", "").strip()
     host = os.getenv("PIP_TRUSTED_HOST", "").strip()
     if enabled:
-        pip = pip or f"{base}/api/v1/dependency-proxy/pypi/simple"
+        # pip goes through the shim; npm goes straight to DevGuard.
+        pip = pip or f"{pip_base}/api/v1/dependency-proxy/pypi/simple"
         npm = npm or f"{base}/api/v1/dependency-proxy/npm"
         if not host:
-            host = base.split("//", 1)[-1].split("/", 1)[0].split(":", 1)[0]
+            # Must match the host in PIP_INDEX_URL, not DevGuard's: pip
+            # refuses a plain-http index unless the host it actually contacts
+            # is trusted.
+            host = pip.split("//", 1)[-1].split("/", 1)[0].split(":", 1)[0]
     return {"pip_index_url": pip, "pip_trusted_host": host,
             "npm_registry": npm, "devguard_enabled": enabled}
 
