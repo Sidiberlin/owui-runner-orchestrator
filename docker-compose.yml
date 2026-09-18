@@ -370,7 +370,9 @@ services:
   # ---------------------------------------------------------------------------
   devguard-cache-init:
     profiles: ["devguard"]
-    image: busybox:1.36
+    # zendis/coreutils:main == BusyBox 1.37 (capability-verified, M0). `user:`
+    # overrides the image's default USER=53111, same as the busybox it replaces.
+    image: registry.opencode.de/oci-community/images/zendis/coreutils:main@sha256:4168c1bbcb59f61711cf1e5a99abdb9634b35a22d1db0f49f927daf87c812da8
     user: "0:0"
     volumes:
       - devguard-cache:/cache
@@ -419,7 +421,7 @@ services:
   # uid 53111 and cannot write a fresh named volume.
   devguard-vulndb-tmp-init:
     profiles: ["devguard-import"]
-    image: busybox:1.36
+    image: registry.opencode.de/oci-community/images/zendis/coreutils:main@sha256:4168c1bbcb59f61711cf1e5a99abdb9634b35a22d1db0f49f927daf87c812da8
     user: "0:0"
     volumes:
       - devguard-vulndb-tmp:/scratch
