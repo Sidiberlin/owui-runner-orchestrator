@@ -171,8 +171,17 @@ class Stack:
     # host by design. Anything that needs to speak to a runner (or to test
     # whether one runner can reach another) has to originate INSIDE a
     # container on that network.
+    #
+    # /usr/bin/curl explicitly, NOT the PATH-resolved `curl`: this is a raw
+    # network-topology probe (used by test_egress/test_isolation to measure
+    # what the network actually permits), not a simulated agent tool call.
+    # The ticket-13 sandbox shim shadows plain `curl` in PATH and would
+    # otherwise refuse a sibling/gateway probe before it ever touched the
+    # network, which is a different (and correct) behavior for an agent but
+    # would make this helper measure the shim instead of the topology.
+    # test_shims.py exercises the shim itself via PATH-resolved `curl`.
     def curl_in(self, container: str, *args: str) -> tuple[int, str]:
-        out = sh("docker", "exec", container, "curl", "-s",
+        out = sh("docker", "exec", container, "/usr/bin/curl", "-s",
                  "-w", "\n%{http_code}", "--max-time", "20", *args,
                  check=False, timeout=60)
         if "\n" not in out:
