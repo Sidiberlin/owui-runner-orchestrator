@@ -4,9 +4,7 @@ Per-user ephemeral coding-agent containers driven by Open WebUI's native
 Open Terminal integration. Self-hosted replacement for the Enterprise-licensed
 "Terminals" orchestrator.
 
-Requirements and full review history: [`docs/DESIGN-HISTORY.md`](docs/DESIGN-HISTORY.md).
-Read the **REVIEW OUTCOMES** sections — they supersede the original spec, and
-v1.5/v1.6 record the bugs found by running the thing rather than reading it.
+Decision records: [`docs/adr/`](docs/adr/) · glossary: [`CONTEXT.md`](CONTEXT.md).
 
 ## Status
 
@@ -125,7 +123,7 @@ silently becoming `user` after a restart.
 
 ## Live operation
 
-Verified against OWUI **<owui-host> (v0.11.1)**. Everything here was
+Verified against OWUI **v0.11.1** on the private deployment host. Everything here was
 measured on the wire, not inferred.
 
 ### Configured connections
@@ -136,11 +134,11 @@ measured on the wire, not inferred.
 | `lxc101-terminal` | `http://open-terminal:8000` | pre-existing, untouched |
 
 > **Consolidated onto one host (ADR-0006).** The orchestrator no longer runs
-> on <orch-host>; that stack was torn down after its workspace volumes were
-> migrated. Everything now runs on <owui-host>, where OWUI reaches the
+> on the original build host; that stack was torn down after its workspace volumes were
+> migrated. Everything now runs on the OWUI host, where OWUI reaches the
 > orchestrator over the shared `owui` network by name
 > (`http://orchestrator:8080`) with no LAN hop and no published port. The
-> connection's stored URL is repointed separately from this repo — the `.64`
+> connection's stored URL is repointed separately from this repo — the old
 > address above is kept only so the original integration record still reads
 > correctly. The `id` is unchanged, so the route prefix below still applies.
 
@@ -233,7 +231,7 @@ by design (A8), but it will look like a total outage. Pick one:
 2. **Refresh the JWT** before expiry:
 
 ```bash
-curl -s -X POST -H 'Content-Type: application/json'   -d '{"email":"<service-account>","password":"<password>"}'   http://<owui-host>/api/v1/auths/signin
+curl -s -X POST -H 'Content-Type: application/json'   -d '{"email":"<service-account>","password":"<password>"}'   "$O/api/v1/auths/signin"
 # take .token, rewrite OWUI_ADMIN_TOKEN in .env, then:
 docker compose up -d orchestrator
 ```
