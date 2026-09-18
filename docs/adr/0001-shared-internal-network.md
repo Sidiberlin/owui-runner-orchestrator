@@ -1,0 +1,3 @@
+# Runners share one internal network with internal services
+
+We rejected per-runner networks (each runner alone on its own bridge) in favor of one shared internal network that also carries internal services. Per-runner isolation was the stricter model, but Open WebUI integration and future internal services (DevGuard, DevGuard-side tooling) need reachability, and the shared network keeps zero-egress enforceable as a single topology property instead of N firewall rule sets. The operator is trusted; the code is not — but network position, not per-runner firewalls, is the isolation boundary we defend.

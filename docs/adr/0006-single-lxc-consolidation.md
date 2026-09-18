@@ -1,0 +1,3 @@
+# Everything runs on one LXC: Open WebUI, orchestrator, runners, DevGuard
+
+Cross-host topologies (relay sidecar on the orchestrator host, firewall-scoped bridge to a remote DevGuard) were designed and rejected: each added a component or rule whose failure silently reopened egress, and the relay existed purely to carry bytes across a network boundary that consolidation eliminates. One Docker ecosystem on one host keeps zero-egress a local topology fact, makes the whole system a single compose invocation, and matches the operator's preference for simplicity. Consequences: resource contention is real (sized against the host's RAM), the homelab blast radius is one machine, and disk sizing becomes a live concern.

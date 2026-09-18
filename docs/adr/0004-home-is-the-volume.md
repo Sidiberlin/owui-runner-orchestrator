@@ -1,0 +1,3 @@
+# The user's home directory IS the persistent volume
+
+Open Terminal's multi-user mode rewrites paths under /home/<user>, and its file browser roots at FILE_BROWSER_ROOT. Mounting the persistent volume at /home/user (and setting FILE_BROWSER_ROOT and WORKDIR to match) makes "everything in the sidebar" and "everything that survives restarts" the same set by construction — no copy step, no silent data loss path. Considered: mounting at /workspace and pointing home elsewhere; rejected because the earlier variant produced a half-broken split (relative-path writes failing) and two notions of "the user's files".
