@@ -1,23 +1,18 @@
 # =============================================================================
 #  OWUI Agent Runner — per-user ephemeral coding-agent container
 #  Lane A.  See REVIEW OUTCOMES v1.2 (N6, N7, N8, N9) in the brief.
+#  Lane A'' (ticket 10): the opencode CLI stage is REMOVED. The driving agent
+#  is the OWUI chat model; Open Terminal is a plain HTTP terminal API, not a
+#  harness, and nothing in this architecture ever invoked the opencode
+#  binary — it was an unused leftover from the project's original brief.
 # =============================================================================
 #
-#  LAYERING — inverted from the original brief (N6)
-#
-#    The brief said "multi-stage build on the openCode base image".  Measured:
-#      ghcr.io/anomalyco/opencode  = Alpine 3.24, NO python3/pip/uv/node/git/curl,
-#                                    and the binary is musl-linked.
-#      Open Terminal               = a Python service.
-#    So openCode cannot host it, and the musl binary cannot be copied into a
-#    glibc image.  We therefore base on Open Terminal and fetch openCode's
-#    glibc build at BUILD time (build-time egress is fine; runtime egress is
-#    zero via the `internal: true` network).
+#  LAYERING
 #
 #      ghcr.io/open-webui/open-terminal:slim   Debian 13 · py3.12 · uid1000 `user`
 #        │                                     tini · hardened entrypoint · :8000
-#        ├─ stage `opencode`  fetch pinned openCode release (installer needs bash)
-#        └─ stage `runtime`   COPY just the binary — nothing else from the builder
+#        ├─ stage `node`      fetch pinned Node tarball (user-work toolchain)
+#        └─ stage `runtime`   COPY just the Node tree — nothing else from the builder
 #
 #  RUNTIME SHAPE — why there is no `USER` line below (N8)
 #
@@ -28,7 +23,7 @@
 #      │                                   to C5, and it needs CAP_CHOWN.
 #      └── gosu user ──► open-terminal run --host 0.0.0.0 --port 8000
 #                          │
-#                          └─ POST /execute ──► opencode, cwd under $HOME
+#                          └─ POST /execute ──► shell command, cwd under $HOME
 #
 #    Setting `USER 1000` here would break both the chown and the gosu drop.
 #    Compose must pair this with:
@@ -38,15 +33,11 @@
 #  HOME (N7)
 #    entrypoint-slim.sh:199 hardcodes `export HOME=/home/user`, which silently
 #    overrides any HOME we set.  The per-user volume therefore mounts at
-#    /home/user — NOT /workspace.  That is also upstream's documented layout and
-#    it keeps openCode's own config/auth on the persistent volume.
+#    /home/user — NOT /workspace.  That is also upstream's documented layout.
 # =============================================================================
 
 ARG OPEN_TERMINAL_REF=ghcr.io/open-webui/open-terminal:slim
-# Pinned to the version shipped in ghcr.io/anomalyco/opencode at review time.
-# Bump deliberately; never float to latest (R4: explicit pinned tag).
-ARG OPENCODE_VERSION=1.18.31
-# Node is fetched as the official tarball, for the same reason openCode is:
+# Node is fetched as the official tarball rather than Debian's package:
 # Debian's `npm` package drags in 377 packages even with
 # --no-install-recommends -- including X11 (x11-utils, zutty, libegl1) and a
 # SECOND interpreter, python3.13, which Debian's python3-pip would then target
@@ -54,20 +45,6 @@ ARG OPENCODE_VERSION=1.18.31
 ARG NODE_VERSION=22.14.0
 
 # ---------------------------------------------------------------- stage 1 ---
-FROM ${OPEN_TERMINAL_REF} AS opencode
-ARG OPENCODE_VERSION
-USER root
-ENV HOME=/root
-# The installer is bash (uses [[ ]]); under sh/dash its arch detection fails
-# with "Unsupported OS/Arch: linux/x86_64".  It honours VERSION= and hardcodes
-# INSTALL_DIR=$HOME/.opencode/bin.
-RUN set -eux; \
-    curl -fsSL https://opencode.ai/install -o /tmp/install.sh; \
-    VERSION="${OPENCODE_VERSION}" bash /tmp/install.sh; \
-    test -x /root/.opencode/bin/opencode; \
-    /root/.opencode/bin/opencode --version
-
-# ---------------------------------------------------------------- stage 1b --
 # Node + npm, so the Package Seam (ADR-0008) has an npm to configure. Without
 # this NPM_CONFIG_REGISTRY is injected into a runner that has no npm at all.
 FROM ${OPEN_TERMINAL_REF} AS node
@@ -96,15 +73,12 @@ RUN set -eux; \
 
 # ---------------------------------------------------------------- stage 2 ---
 FROM ${OPEN_TERMINAL_REF} AS runtime
-ARG OPENCODE_VERSION
 ARG NODE_VERSION
 
 LABEL org.opencontainers.image.title="owui-agent-runner" \
-      org.opencontainers.image.description="Per-user ephemeral coding-agent runner (Open Terminal + openCode)" \
-      io.owui.runner.opencode-version="${OPENCODE_VERSION}" \
+      org.opencontainers.image.description="Per-user ephemeral coding-agent runner (Open Terminal)" \
       io.owui.runner.node-version="${NODE_VERSION}"
 
-COPY --from=opencode /root/.opencode/bin/opencode /usr/local/bin/opencode
 COPY --from=node /opt/node /opt/node
 
 # pip for the image's OWN python3.12. ensurepip ships in the stdlib, so this
@@ -140,7 +114,6 @@ ENV OPEN_TERMINAL_MAX_SESSIONS=8 \
 
 RUN set -eux; \
     install -d -o user -g user -m 0755 /home/user; \
-    opencode --version; \
     node --version; \
     npm --version; \
     python3 -m pip --version

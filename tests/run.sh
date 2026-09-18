@@ -68,5 +68,6 @@ set -e
 echo "==> tearing down"
 docker compose --env-file env.test -p owui-runner-test down -v >/dev/null 2>&1 || true
 docker rm -f stub-owui-test >/dev/null 2>&1 || true
+docker network rm owui-runner-test-owui >/dev/null 2>&1 || true
 docker stop owui-buildkitd >/dev/null 2>&1 || true
 exit $RC

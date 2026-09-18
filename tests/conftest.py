@@ -27,7 +27,6 @@ ROOT = os.path.dirname(HERE)
 PROJECT = "owui-runner-test"
 ENV_FILE = os.path.join(HERE, "env.test")
 STUB_NAME = "stub-owui-test"
-EDGE_NET = f"{PROJECT}_edge"
 
 # Unit tests import the application directly.
 sys.path.insert(0, os.path.join(ROOT, "orchestrator"))
@@ -215,6 +214,19 @@ class Stack:
         time.sleep(2)
 
 
+def _ensure_owui_network() -> str:
+    """`owui` is declared `external: true` (ADR-0006: the orchestrator joins
+    OWUI's own docker network by name), so compose will not create it. This
+    box runs no real OWUI, so the suite owns a throwaway stand-in network
+    under a test-only name and is responsible for its lifecycle."""
+    name = env_value("OWUI_NETWORK")
+    existing = sh("docker", "network", "ls", "-q", "--filter", f"name=^{name}$",
+                  check=False)
+    if not existing.strip():
+        sh("docker", "network", "create", name)
+    return name
+
+
 def _docker_available() -> bool:
     try:
         sh("docker", "version", "--format", "{{.Server.Version}}", timeout=20)
@@ -233,9 +245,10 @@ def stack() -> Stack:
             "run tests/run.sh which builds it first"
         )
 
+    owui_net = _ensure_owui_network()
     compose("up", "-d", timeout=300)
     sh("docker", "rm", "-f", STUB_NAME, check=False)
-    sh("docker", "run", "-d", "--name", STUB_NAME, "--network", EDGE_NET,
+    sh("docker", "run", "-d", "--name", STUB_NAME, "--network", owui_net,
        "--security-opt", "apparmor=unconfined",
        "-v", f"{HERE}:/t:ro", "-e", f"STUB_TOKEN={env_value('OWUI_ADMIN_TOKEN')}",
        "python:3.12-slim", "python", "/t/stub_owui.py", timeout=300)
@@ -259,6 +272,7 @@ def stack() -> Stack:
     purge_runners()
     sh("docker", "rm", "-f", STUB_NAME, check=False)
     compose("down", "-v", check=False, timeout=240)
+    sh("docker", "network", "rm", owui_net, check=False)
 
 
 @pytest.fixture

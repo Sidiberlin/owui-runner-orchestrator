@@ -3,21 +3,23 @@
 #  See REVIEW OUTCOMES v1.2 (N2, N4, N5) in the brief.
 # =============================================================================
 #
-#  NETWORK TOPOLOGY (N2) — three networks, not one.
+#  NETWORK TOPOLOGY (N2, updated by ADR-0006) — three networks, not one.
 #
 #    A socket proxy reachable by runners is worse than no socket proxy, so
 #    `control` exists solely to keep docker-socket-proxy off `runners`.
 #
-#       LAN 192.168.x.0/24 ──► OWUI .101
-#              ▲
-#              │  edge (bridge, NOT internal)
-#              │  · orchestrator needs this to reach the OWUI admin API (B1/Q1)
-#        ┌─────┴───────────┐
-#        │  orchestrator   │
-#        └──┬───────────┬──┘
-#   control │           │ runners
-#  (internal)           │ (internal: true, zero egress)
-#           ▼           ▼
+#    Single-LXC consolidation (ADR-0006) put OWUI on this same host, so the
+#    orchestrator joins OWUI's own docker network (`owui`, external) by name
+#    instead of crossing the LAN — no bridge, no published port needed for
+#    that hop (B1/Q1).
+#
+#        ┌────── owui (external, OWUI's network) ──┐
+#        │                                          │
+#        │              orchestrator                │
+#        └──┬───────────────────┬──────────────────┘
+#   control │                   │ runners
+#  (internal)                   │ (internal: true, zero egress)
+#           ▼                   ▼
 #  ┌────────────────┐  ┌──────────────────────────────┐
 #  │ socket-proxy   │  │ runner-<uid> … (created by    │
 #  │ (docker API)   │  │ the orchestrator, NOT compose)│
@@ -34,8 +36,6 @@
 name: owui-runner
 
 networks:
-  edge:
-    driver: bridge
   control:
     driver: bridge
     internal: true
@@ -268,7 +268,6 @@ services:
     build:
       context: ./runner
       args:
-        OPENCODE_VERSION: ${OPENCODE_VERSION:-1.18.31}
         NODE_VERSION: ${NODE_VERSION:-22.14.0}
     image: ${RUNNER_IMAGE:-owui-agent-runner:dev}
 
