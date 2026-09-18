@@ -264,6 +264,7 @@ services:
       context: ./runner
       args:
         OPENCODE_VERSION: ${OPENCODE_VERSION:-1.18.31}
+        NODE_VERSION: ${NODE_VERSION:-22.14.0}
     image: ${RUNNER_IMAGE:-owui-agent-runner:dev}
 
   # ===========================================================================

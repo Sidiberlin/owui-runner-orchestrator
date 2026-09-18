@@ -46,6 +46,12 @@ ARG OPEN_TERMINAL_REF=ghcr.io/open-webui/open-terminal:slim
 # Pinned to the version shipped in ghcr.io/anomalyco/opencode at review time.
 # Bump deliberately; never float to latest (R4: explicit pinned tag).
 ARG OPENCODE_VERSION=1.18.31
+# Node is fetched as the official tarball, for the same reason openCode is:
+# Debian's `npm` package drags in 377 packages even with
+# --no-install-recommends -- including X11 (x11-utils, zutty, libegl1) and a
+# SECOND interpreter, python3.13, which Debian's python3-pip would then target
+# instead of this image's own 3.12. MEASURED, not assumed.
+ARG NODE_VERSION=22.14.0
 
 # ---------------------------------------------------------------- stage 1 ---
 FROM ${OPEN_TERMINAL_REF} AS opencode
@@ -61,15 +67,58 @@ RUN set -eux; \
     test -x /root/.opencode/bin/opencode; \
     /root/.opencode/bin/opencode --version
 
+# ---------------------------------------------------------------- stage 1b --
+# Node + npm, so the Package Seam (ADR-0008) has an npm to configure. Without
+# this NPM_CONFIG_REGISTRY is injected into a runner that has no npm at all.
+FROM ${OPEN_TERMINAL_REF} AS node
+ARG NODE_VERSION
+USER root
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) node_arch=x64 ;; \
+      arm64) node_arch=arm64 ;; \
+      *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
+    esac; \
+    # .tar.gz, not .tar.xz: this image ships no xz, and tar then fails with
+    # "xz: Cannot exec". gzip costs a slightly larger download and no apt.
+    curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.gz" \
+      -o /tmp/node.tar.gz; \
+    mkdir -p /opt/node; \
+    tar -xzf /tmp/node.tar.gz -C /opt/node --strip-components=1; \
+    rm /tmp/node.tar.gz; \
+    # Drop what a runner never needs: headers, docs, and npm's own man pages.
+    rm -rf /opt/node/include /opt/node/share; \
+    # npm's shebang is `#!/usr/bin/env node`, so node must be on PATH here or
+    # this check dies with "env: 'node': No such file or directory".
+    /opt/node/bin/node --version; \
+    PATH="/opt/node/bin:$PATH" npm --version
+
 # ---------------------------------------------------------------- stage 2 ---
 FROM ${OPEN_TERMINAL_REF} AS runtime
 ARG OPENCODE_VERSION
+ARG NODE_VERSION
 
 LABEL org.opencontainers.image.title="owui-agent-runner" \
       org.opencontainers.image.description="Per-user ephemeral coding-agent runner (Open Terminal + openCode)" \
-      io.owui.runner.opencode-version="${OPENCODE_VERSION}"
+      io.owui.runner.opencode-version="${OPENCODE_VERSION}" \
+      io.owui.runner.node-version="${NODE_VERSION}"
 
 COPY --from=opencode /root/.opencode/bin/opencode /usr/local/bin/opencode
+COPY --from=node /opt/node /opt/node
+
+# pip for the image's OWN python3.12. ensurepip ships in the stdlib, so this
+# costs no apt packages and cannot introduce a second interpreter the way
+# Debian's python3-pip does. Without it PIP_INDEX_URL is injected into a
+# runner whose python has no pip module at all.
+RUN set -eux; \
+    ln -s /opt/node/bin/node /usr/local/bin/node; \
+    ln -s /opt/node/bin/npm  /usr/local/bin/npm; \
+    ln -s /opt/node/bin/npx  /usr/local/bin/npx; \
+    python3 -m ensurepip --upgrade; \
+    python3 -m pip --version; \
+    node --version; \
+    npm --version
 
 # Q2 / N7 — one user per container, so Open Terminal's own multi-user account
 # provisioning is redundant AND impossible here (it shells out to sudo, which
@@ -91,7 +140,10 @@ ENV OPEN_TERMINAL_MAX_SESSIONS=8 \
 
 RUN set -eux; \
     install -d -o user -g user -m 0755 /home/user; \
-    opencode --version
+    opencode --version; \
+    node --version; \
+    npm --version; \
+    python3 -m pip --version
 
 # The base image sets WorkingDir=/app (root-owned).  Without this the agent's
 # cwd is /app, so every RELATIVE-path write through /files/write fails with
