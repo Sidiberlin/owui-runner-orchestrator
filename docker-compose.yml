@@ -295,7 +295,15 @@ services:
       - ./devguard/healthcheck.sh:/opt/devguard-healthcheck.sh:ro
     tmpfs: /run/postgresql:rw,uid=999,gid=999
     security_opt: [no-new-privileges, apparmor=unconfined]
-    mem_limit: ${DEVGUARD_PG_MEMORY:-512m}
+    # 512m OOM-kills postgres mid-import: the malicious-package feed can only
+    # be loaded by `devguard-cli vulndb import`, which is all-or-nothing (the
+    # --limitedToTables flag is plumbed through and then only logged -- it
+    # filters nothing, in v1.14.0 or on main), so the whole vulndb lands:
+    # ~13M cve_affected_component rows, 3.6GB of database. MEASURED: at 512m
+    # the backend dies with "terminated by signal 9" partway through
+    # insertStageIntoLive; at 4096m the import completes in 7m32s.
+    # Upstream's chart asks for 8Gi limit / 2Gi request.
+    mem_limit: ${DEVGUARD_PG_MEMORY:-4096m}
     healthcheck:
       # Not just pg_isready: initdb.sh once failed outright (no sed in this
       # image) and postgres still went healthy with no kratos database, so

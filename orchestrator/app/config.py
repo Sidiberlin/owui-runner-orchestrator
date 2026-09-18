@@ -38,11 +38,25 @@ def _package_seam() -> dict:
     can point at something other than DevGuard without editing code. Enabling
     DevGuard only supplies defaults.
 
-    Paths verified against upstream: pip is
-    /api/v1/dependency-proxy/pypi/simple (with PIP_TRUSTED_HOST, since the hop
-    is plain http). The npm path is the less certain of the two — upstream
-    issue #3022 is literally "Wrong dependency proxy URLs" — so it is
-    overridable and asserted by a live test rather than trusted blindly.
+    Both paths are now verified live against DevGuard v1.14.0 from a container
+    on the runners network, with and without a trailing slash.
+
+    npm WORKS: /api/v1/dependency-proxy/npm. It works despite DevGuard serving
+    the packument verbatim, dist.tarball still pointing at
+    registry.npmjs.org, and that host being unresolvable from a runner --
+    because npm's own `replace-registry-host` default ("npmjs") rewrites the
+    npmjs.org tarball host onto the configured registry, landing exactly on
+    DevGuard's /npm/:package/-/* route. Setting replace-registry-host=never in
+    a runner would therefore break installs; nothing sets it.
+
+    pip is BROKEN and the URL is not the reason. The index resolves fine, but
+    DevGuard passes PyPI's simple index through unrewritten (ProxyPyPISimple
+    -> writeResponse, no rewriting on main either), so every href still points
+    at files.pythonhosted.org, pip does not rewrite hosts the way npm does,
+    and a zero-egress runner cannot resolve it. DevGuard does expose a working
+    /api/v1/dependency-proxy/pypi/packages/* route -- the index simply never
+    points at it. Until that gap is closed, PIP_INDEX_URL reaches the firewall
+    for metadata but no wheel can be downloaded.
     """
     enabled = os.getenv("DEVGUARD_ENABLED", "false").strip().lower() in (
         "1", "true", "yes", "on")
