@@ -285,9 +285,13 @@ services:
       POSTGRES_USER: devguard
       POSTGRES_PASSWORD: ${DEVGUARD_DB_PASSWORD:?set DEVGUARD_DB_PASSWORD in .env}
       POSTGRES_DB: devguard
+      KRATOS_DB_PASSWORD: ${DEVGUARD_DB_PASSWORD}
     volumes:
       - devguard-pg:/var/lib/postgresql/data
-      - ./devguard/initdb.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      # Upstream SQL mounted OUTSIDE the init dir so it is not also run
+      # directly; init.sh runs it with the password substituted.
+      - ./devguard/initdb.sql:/opt/devguard-initdb.sql:ro
+      - ./devguard/initdb.sh:/docker-entrypoint-initdb.d/init.sh:ro
     tmpfs: /run/postgresql:rw,uid=999,gid=999
     security_opt: [no-new-privileges, apparmor=unconfined]
     mem_limit: ${DEVGUARD_PG_MEMORY:-512m}
