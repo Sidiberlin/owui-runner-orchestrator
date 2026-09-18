@@ -328,22 +328,102 @@ give it a distinct `RUNNERS_NETWORK` — the compose default already does.
 A runner with **no** owner label is treated as legacy and reaped so a labelled
 one replaces it. Workspace volumes are untouched.
 
-### Dependency installs without egress (DevGuard seam)
+### Dependency installs without egress (the DevGuard Package Seam)
 
-Runners have zero egress, so `pip install` cannot reach PyPI. `PIP_INDEX_URL`
-is injected into every runner at **create time** (empty by default, so it is
-inert until you use it).
+Runners have zero egress, so `pip install` and `npm install` cannot reach
+PyPI or npmjs. `PIP_INDEX_URL` and `NPM_CONFIG_REGISTRY` are injected into
+every runner at **create time** — empty by default, so the seam is inert until
+you turn DevGuard on. They are reachable because DevGuard sits inside the
+isolated network, not because the network was loosened. **No egress hole is
+ever opened.** Changes take effect on each runner's next spawn.
 
-The intended shape: run a DevGuard dependency-proxy container **on the same
-`runners-internal` network** and point this at it:
+Turn it on with one variable:
 
 ```
-PIP_INDEX_URL=http://devguard:3141/root/pypi/+simple/
+DEVGUARD_ENABLED=true
 ```
 
-The proxy is reachable because it sits inside the isolated network, not because
-the network was loosened. **No egress hole is ever opened** — that was the
-point of the seam. Changing it takes effect on each runner's next spawn.
+Both URLs are then derived, and both are verified live rather than taken from
+upstream's docs:
+
+| | URL | |
+|---|---|---|
+| npm | `http://devguard-api:8080/api/v1/dependency-proxy/npm` | straight to DevGuard |
+| pip | `http://pip-shim:8080/api/v1/dependency-proxy/pypi/simple` | via the shim (ADR-0010) |
+
+**Why pip takes a detour and npm does not.** DevGuard serves both registries'
+metadata verbatim, so npm's `dist.tarball` still points at
+`registry.npmjs.org` and PyPI's index links still point at
+`files.pythonhosted.org` — neither resolvable from a runner. npm rescues
+itself: its `replace-registry-host` default rewrites that host onto the
+configured registry, landing exactly on DevGuard's tarball route. pip has no
+equivalent and follows the links literally, so the index resolves and every
+download dies in DNS. `pip-shim` rewrites those links onto DevGuard's own
+`pypi/packages` route. Consequences worth knowing:
+
+- Setting `replace-registry-host=never` in a runner breaks npm installs.
+- Pointing `PIP_INDEX_URL` straight at `devguard-api` looks like it works —
+  metadata resolves — and then downloads nothing.
+- `PIP_TRUSTED_HOST` must name the host pip actually contacts (the shim), or
+  pip refuses the plain-http index.
+
+### Bringing DevGuard up
+
+Order matters, and compose enforces it — the API auto-creates a `casbin_rule`
+table if it starts first, after which the migration chain cannot proceed
+without dropping it.
+
+```
+docker compose --profile devguard up -d
+```
+
+That runs postgres → kratos-migrate → devguard-migrate →
+encryption-migration → cache-init → api, kratos, web, pip-shim.
+
+**The firewall blocks nothing until you import the feed.** A fresh install has
+an empty `malicious_packages` table, and an empty table looks exactly like a
+working firewall from the outside. Import it:
+
+```
+docker compose --profile devguard --profile devguard-import \
+  run --rm devguard-vulndb-import
+```
+
+Notes, all measured:
+
+- **It is all-or-nothing.** `--limitedToTables=malicious_packages` looks like
+  it would import just the feed; the flag is plumbed through and then only
+  logged. It filters nothing. Expect the whole vulndb: ~13M rows, 3.6GB of
+  database, about 7½ minutes.
+- **Postgres needs ≥4GB for it.** At 512m the backend is OOM-killed partway
+  through (`terminated by signal 9`). `DEVGUARD_PG_MEMORY` defaults to 4096m.
+- The import service carries its own `/tmp` volume and `FRONTEND_URL`; the
+  image is distroless, so without them the import dies on `stat /tmp` or
+  panics with `FRONTEND_URL is not set`.
+- Re-run it periodically — the feed is only as current as the last import.
+
+Check it took:
+
+```
+docker compose --profile devguard exec devguard-postgres \
+  psql -U devguard -d devguard -tAc 'SELECT count(*) FROM malicious_packages'
+```
+
+### Verifying the seam actually works
+
+Assertions, not assumptions. Against a host running the devguard profile:
+
+```
+cd tests
+DEVGUARD_LIVE=1 ORCH_BASE_URL=http://127.0.0.1:8080 \
+ORCH_API_KEY=... SEAM_UID=<an Open WebUI user id> \
+  ./.venv/bin/python -m pytest integration/test_package_seam.py
+```
+
+That spawns a real runner and checks a benign pip and npm install both
+succeed, a flagged package is refused by the firewall in both ecosystems, the
+feed is non-empty, and `1.1.1.1`, `registry.npmjs.org` and
+`files.pythonhosted.org` all remain unreachable from inside the runner.
 
 ### Workspace retention (R2)
 

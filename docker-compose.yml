@@ -70,6 +70,11 @@ volumes:
   orch-state:
   devguard-pg:
   devguard-cache:
+  # Scratch for `devguard-cli vulndb import`: the API image is distroless and
+  # has no /tmp of its own, so the import dies with "stat /tmp: no such file
+  # or directory". Upstream's chart mounts an 8Gi emptyDir here for the same
+  # reason.
+  devguard-vulndb-tmp:
 
 services:
 
@@ -393,6 +398,59 @@ services:
     command: ["devguard-cli", "migrate"]
     security_opt: [no-new-privileges, apparmor=unconfined]
     restart: on-failure
+
+  # ---------------------------------------------------------------------------
+  # Malicious-package feed import. NOT part of the `devguard` profile: it is a
+  # maintenance job, run on demand and re-run periodically.
+  #
+  #   docker compose --profile devguard --profile devguard-import \
+  #     run --rm devguard-vulndb-import
+  #
+  # Both profiles: devguard-postgres lives in the `devguard` one, and compose
+  # refuses the project outright if a depends_on target is not selected.
+  #
+  # The dependency firewall checks a table; until this has run that table is
+  # empty, and an empty table blocks nothing while looking exactly like a
+  # working firewall from outside.
+  #
+  # Dual-homed deliberately: the database is on devguard-internal, the vulndb
+  # artifact is pulled from an OCI registry, which needs devguard-egress.
+  # ---------------------------------------------------------------------------
+  # Same root-owned-volume problem as devguard-cache-init: the import runs as
+  # uid 53111 and cannot write a fresh named volume.
+  devguard-vulndb-tmp-init:
+    profiles: ["devguard-import"]
+    image: busybox:1.36
+    user: "0:0"
+    volumes:
+      - devguard-vulndb-tmp:/scratch
+    command: ["sh", "-c", "chown -R 53111:53111 /scratch && chmod 0750 /scratch"]
+    security_opt: [no-new-privileges, apparmor=unconfined]
+
+  devguard-vulndb-import:
+    profiles: ["devguard-import"]
+    image: ghcr.io/l3montree-dev/devguard:${DEVGUARD_VERSION:-v1.14.0}
+    networks: [devguard-internal, devguard-egress]
+    depends_on:
+      devguard-postgres: {condition: service_healthy}
+      devguard-vulndb-tmp-init: {condition: service_completed_successfully}
+    environment:
+      POSTGRES_HOST: devguard-postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: devguard
+      POSTGRES_PASSWORD: ${DEVGUARD_DB_PASSWORD}
+      POSTGRES_DB: devguard
+      # Not optional: the CLI builds the full service graph before running the
+      # import and panics with "FRONTEND_URL is not set" without it.
+      FRONTEND_URL: ${DEVGUARD_FRONTEND_URL:-http://devguard-web:3000}
+      GOMEMLIMIT: ${DEVGUARD_API_GOMEMLIMIT:-1024MiB}
+    volumes:
+      - devguard-vulndb-tmp:/tmp
+    # --limitedToTables is NOT passed, because it does nothing: the flag is
+    # plumbed from the CLI into ImportOptions and then only logged, in v1.14.0
+    # and on main. The whole vulndb lands either way.
+    command: ["devguard-cli", "vulndb", "import"]
+    security_opt: [no-new-privileges, apparmor=unconfined]
 
   devguard-encryption-migration:
     profiles: ["devguard"]
