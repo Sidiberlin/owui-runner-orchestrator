@@ -2,7 +2,7 @@
 
 **Repo:** https://github.com/l3montree-dev/devguard
 **Affects:** v1.14.0 and `main`
-**Status:** not yet filed — `gh` on this host has an invalid token. Post as-is.
+**Status:** filed — [l3montree-dev/devguard#3067](https://github.com/l3montree-dev/devguard/issues/3067) (2026-09-18). Local workaround in the meantime: the `pip-shim` rewrite sidecar (ADR-0010); removal instructions are in `docker-compose.yml` once upstream merges the fix.
 
 ---
 
