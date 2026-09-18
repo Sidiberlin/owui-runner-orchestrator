@@ -1,0 +1,229 @@
+# =============================================================================
+#  OWUI Agent Runner Orchestrator — Lane D
+#  See REVIEW OUTCOMES v1.2 (N2, N4, N5) in the brief.
+# =============================================================================
+#
+#  NETWORK TOPOLOGY (N2) — three networks, not one.
+#
+#    A socket proxy reachable by runners is worse than no socket proxy, so
+#    `control` exists solely to keep docker-socket-proxy off `runners`.
+#
+#       LAN 192.168.x.0/24 ──► OWUI .101
+#              ▲
+#              │  edge (bridge, NOT internal)
+#              │  · orchestrator needs this to reach the OWUI admin API (B1/Q1)
+#        ┌─────┴───────────┐
+#        │  orchestrator   │
+#        └──┬───────────┬──┘
+#   control │           │ runners
+#  (internal)           │ (internal: true, zero egress)
+#           ▼           ▼
+#  ┌────────────────┐  ┌──────────────────────────────┐
+#  │ socket-proxy   │  │ runner-<uid> … (created by    │
+#  │ (docker API)   │  │ the orchestrator, NOT compose)│
+#  └───────┬────────┘  └──────────────────────────────┘
+#          │ /var/run/docker.sock
+#          ▼  ** host root — see residual risks in v1.2 **
+#
+#  WHAT THIS FILE DOES NOT DO (Lane B owns these — see the v1.2 lane correction)
+#    · per-user workspace volumes  — lazy, per-user, cannot be pre-declared here
+#    · the quota layer (N4)
+#    · per-runner key derivation (N1)
+# =============================================================================
+
+name: owui-runner
+
+networks:
+  edge:
+    driver: bridge
+  control:
+    driver: bridge
+    internal: true
+  runners:
+    driver: bridge
+    internal: true
+    # Explicit name: the orchestrator attaches runners to this network BY NAME
+    # through the Docker API, so it must not depend on compose's project prefix.
+    name: ${RUNNERS_NETWORK:-owui-runners-internal}
+
+volumes:
+  orch-state:
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Docker API broker (Q3 / N2).  The orchestrator never sees the raw socket.
+  # NOTE: mounting the socket `:ro` does NOT make the Docker API read-only — it
+  # only makes the bind mount read-only.  Write protection comes entirely from
+  # the verb flags below.
+  # ---------------------------------------------------------------------------
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:0.3.0
+    restart: unless-stopped
+    networks: [control]           # deliberately NOT on `runners` (N2)
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    security_opt:
+      - no-new-privileges
+      # N5: this LXC host cannot load AppArmor profiles. Drop this line on a
+      # host where `docker-default` loads normally.
+      - apparmor=unconfined
+    environment:
+      # --- allowed: exactly what the orchestrator needs -----------------------
+      POST: 1          # without this everything below is read-only
+      CONTAINERS: 1    # create / start / stop / remove / inspect / list
+      NETWORKS: 1      # attach runners to `runners`
+      VOLUMES: 1       # per-user workspace volumes — omitting this 403s every
+                       # first-time spawn (N2)
+      IMAGES: 1        # startup image-existence check (R4)
+      INFO: 1          # admission control reads real free memory (R3)
+      PING: 1
+      # --- denied ------------------------------------------------------------
+      # MEASURED, not assumed: EXEC=0 returns 403 on POST /exec/{id}/start but
+      # does NOT block POST /containers/{id}/exec (that is gated by CONTAINERS
+      # and returns 201). An exec instance can be created but never started, so
+      # exec is inert — just not blocked where you would expect.
+      EXEC: 0
+      AUTH: 0
+      BUILD: 0
+      COMMIT: 0
+      CONFIGS: 0
+      DISTRIBUTION: 0
+      NODES: 0
+      PLUGINS: 0
+      SECRETS: 0
+      SERVICES: 0
+      SESSION: 0
+      SWARM: 0
+      SYSTEM: 0
+      TASKS: 0
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:2375/_ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  # ---------------------------------------------------------------------------
+  # Orchestrator (Lane B builds the image this points at).
+  # `docker compose config` validates now; `up` works once orchestrator/ exists.
+  # ---------------------------------------------------------------------------
+  orchestrator:
+    build:
+      context: ./orchestrator
+    image: owui-orchestrator:${ORCH_TAG:-dev}
+    restart: unless-stopped
+    depends_on:
+      docker-socket-proxy:
+        condition: service_healthy   # avoids racing the R4 startup image check
+    networks: [edge, control, runners]
+    ports:
+      # OWUI .101 reaches the orchestrator here (System-Level Connection URL).
+      - "${ORCH_BIND:-0.0.0.0}:${ORCH_PORT:-8080}:8080"
+    volumes:
+      # Orchestrator's own state (last-known workspace sizes for the N4 monitor).
+      # NOT the users' data — the quota monitor reads usage through the runner's
+      # own API rather than mounting everyone's files.
+      #
+      # A NAMED VOLUME, deliberately, not ./data. A host bind mount arrives
+      # root-owned and the orchestrator runs as uid 10001, so it could not write
+      # its own cache: usage was forgotten on every restart and the aggregate
+      # ceiling (R2) silently became unenforceable. A named volume seeds its
+      # ownership from the image path, which the Dockerfile already chowns.
+      # Same failure class as C5, except a bind mount gets no entrypoint chown.
+      - orch-state:/data
+    security_opt:
+      - no-new-privileges
+      - apparmor=unconfined          # N5
+    cap_drop: [ALL]
+    environment:
+      DOCKER_HOST: tcp://docker-socket-proxy:2375
+
+      # --- auth (three distinct secrets — never reuse a value) ---------------
+      ORCH_API_KEY:       ${ORCH_API_KEY:?set ORCH_API_KEY in .env}
+      ORCH_MASTER_SECRET: ${ORCH_MASTER_SECRET:?set ORCH_MASTER_SECRET in .env}
+      OWUI_BASE_URL:      ${OWUI_BASE_URL:?set OWUI_BASE_URL in .env}
+      OWUI_ADMIN_TOKEN:   ${OWUI_ADMIN_TOKEN:?set OWUI_ADMIN_TOKEN in .env}
+
+      # --- role mapper (A8: fail closed, bounded) ----------------------------
+      ROLE_CACHE_TTL:   ${ROLE_CACHE_TTL:-60}
+      ROLE_CACHE_GRACE: ${ROLE_CACHE_GRACE:-600}
+      OWUI_API_TIMEOUT: ${OWUI_API_TIMEOUT:-5}
+
+      # --- runner lifecycle ---------------------------------------------------
+      RUNNER_IMAGE:    ${RUNNER_IMAGE:-owui-agent-runner:dev}
+      RUNNERS_NETWORK: ${RUNNERS_NETWORK:-owui-runners-internal}
+      RUNNER_CPUS:     ${RUNNER_CPUS:-1.5}
+      RUNNER_MEMORY:   ${RUNNER_MEMORY:-1g}
+      RUNNER_PIDS:     ${RUNNER_PIDS:-256}
+      MAX_CONTAINERS:  ${MAX_CONTAINERS:-6}
+      IDLE_TIMEOUT:    ${IDLE_TIMEOUT:-30m}
+
+      # Runner security posture, as config so N5 is a one-line change when this
+      # moves off LXC, and so N8's cap set is visible rather than buried in code.
+      RUNNER_SECURITY_OPT: ${RUNNER_SECURITY_OPT:-no-new-privileges,apparmor=unconfined}
+      RUNNER_CAP_ADD:      ${RUNNER_CAP_ADD:-CHOWN,DAC_OVERRIDE,FOWNER,SETUID,SETGID}
+
+      # --- disk (N4: monitor-and-enforce; no kernel-level quota on this host) -
+      RUNNER_DISK_SOFT:        ${RUNNER_DISK_SOFT:-5g}
+      RUNNER_DISK_HARD:        ${RUNNER_DISK_HARD:-6g}
+      WORKSPACE_TOTAL_CEILING: ${WORKSPACE_TOTAL_CEILING:-60g}
+      DISK_POLL_INTERVAL:      ${DISK_POLL_INTERVAL:-60}
+      # How often the idle sweep runs. Teardown latency is at worst
+      # IDLE_TIMEOUT + this.
+      IDLE_SWEEP_INTERVAL:     ${IDLE_SWEEP_INTERVAL:-30}
+
+      # --- per-role policy (Lane C) -------------------------------------------
+      # Default to the user limits, so "admin gets higher limits" is opt-in
+      # rather than an accidental capacity hole. Admin runners still count
+      # against MAX_CONTAINERS.
+      ADMIN_RUNNER_CPUS:      ${ADMIN_RUNNER_CPUS:-}
+      ADMIN_RUNNER_MEMORY:    ${ADMIN_RUNNER_MEMORY:-}
+      ADMIN_RUNNER_DISK_SOFT: ${ADMIN_RUNNER_DISK_SOFT:-}
+      # Q5 denylist. Everything not listed here is forwarded to the runner.
+      PROXY_DENY_PREFIXES:    ${PROXY_DENY_PREFIXES:-/proxy,/ports,/api/terminals}
+      # CSP injected on /files/serve responses. Agent-authored HTML is
+      # otherwise executed in OWUI's own origin (verified live). Empty
+      # disables the hardening.
+      FILES_SERVE_CSP:        ${FILES_SERVE_CSP:-sandbox}
+
+      # --- Open Terminal knobs pushed into each runner at create time (C6) ----
+      OPEN_TERMINAL_MAX_SESSIONS:    ${OPEN_TERMINAL_MAX_SESSIONS:-8}
+      OPEN_TERMINAL_EXECUTE_TIMEOUT: ${OPEN_TERMINAL_EXECUTE_TIMEOUT:-120}
+      OPEN_TERMINAL_SESSION_CWD_TTL: ${OPEN_TERMINAL_SESSION_CWD_TTL:-604800}
+
+      # --- future dependency proxy (empty default, no egress hole) ------------
+      PIP_INDEX_URL: ${PIP_INDEX_URL:-}
+
+      # --- plumbing -----------------------------------------------------------
+      # Headroom left free on the host AFTER admitting a runner (R3). Without
+      # this passed through, the code default silently wins and the knob in
+      # .env does nothing.
+      MEMORY_RESERVE:     ${MEMORY_RESERVE:-512m}
+      # Free-memory admission gate. OFF by default: inside Docker-on-LXC
+      # /proc/meminfo is virtualised and under-reports by over a gigabyte, so
+      # the gate refuses users while the host has plenty free. MAX_CONTAINERS x
+      # RUNNER_MEMORY is the real, deterministic bound. Turn on only where
+      # /proc/meminfo is accurate (a full VM).
+      MEMORY_GATE:          ${MEMORY_GATE:-off}
+      RUNNER_MEMORY_BUDGET: ${RUNNER_MEMORY_BUDGET:-}
+      # Bumping this makes every existing runner reapable on the next
+      # reconciliation - that is how you roll a new runner image (A4).
+      RUNNER_VERSION:     ${RUNNER_VERSION:-1}
+      # Daemon here reports MinAPIVersion 1.44; aiodocker's default is older
+      # and gets rejected outright.
+      DOCKER_API_VERSION: ${DOCKER_API_VERSION:-v1.44}
+      LOG_LEVEL:          ${LOG_LEVEL:-INFO}
+
+  # ---------------------------------------------------------------------------
+  # Build-only helper: produces the runner image. Never started.
+  #   docker compose --profile build build runner-image
+  # Runners themselves are created by the orchestrator via the Docker API.
+  # ---------------------------------------------------------------------------
+  runner-image:
+    profiles: ["build"]
+    build:
+      context: ./runner
+      args:
+        OPENCODE_VERSION: ${OPENCODE_VERSION:-1.18.31}
+    image: ${RUNNER_IMAGE:-owui-agent-runner:dev}

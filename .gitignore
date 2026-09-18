@@ -1,0 +1,18 @@
+# Real secrets — ORCH_API_KEY, ORCH_MASTER_SECRET, live OWUI admin JWT.
+# tests/env.test IS committed on purpose: its values are fake by design and
+# the suite needs them.
+.env
+.env.local
+.env.bak
+
+# test virtualenv, caches, transient state
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+
+# orchestrator runtime state (a named volume in compose; this is belt+braces)
+data/
+
+*.log
+*.pid
