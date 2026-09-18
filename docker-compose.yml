@@ -39,6 +39,26 @@ networks:
   control:
     driver: bridge
     internal: true
+  # Open WebUI's own network. External: OWUI owns it, we join it. This is what
+  # lets OWUI reach the orchestrator by name (http://orchestrator:8080) once
+  # everything is consolidated onto one host (ADR-0006), with no LAN hop and
+  # no published port.
+  owui:
+    external: true
+    name: ${OWUI_NETWORK:-open-webui_default}
+
+  # DevGuard's backing services. Internal: postgres/kratos/web have no reason
+  # to reach the internet.
+  devguard-internal:
+    driver: bridge
+    internal: true
+
+  # The ONLY network in this file with upstream access. Exactly one service
+  # joins it (devguard-api), which is what makes "runners reach pypi only
+  # through a package firewall" a topology fact rather than a promise.
+  devguard-egress:
+    driver: bridge
+
   runners:
     driver: bridge
     internal: true
@@ -48,6 +68,8 @@ networks:
 
 volumes:
   orch-state:
+  devguard-pg:
+  devguard-cache:
 
 services:
 
@@ -116,10 +138,12 @@ services:
     depends_on:
       docker-socket-proxy:
         condition: service_healthy   # avoids racing the R4 startup image check
-    networks: [edge, control, runners]
+    networks: [owui, control, runners]
     ports:
-      # OWUI .101 reaches the orchestrator here (System-Level Connection URL).
-      - "${ORCH_BIND:-0.0.0.0}:${ORCH_PORT:-8080}:8080"
+      # Consolidated on one host, OWUI reaches us over the `owui` network by
+      # name, so this publish is for local operators and the test suite only.
+      # Default binds to loopback: nothing on the LAN needs it.
+      - "${ORCH_BIND:-127.0.0.1}:${ORCH_PORT:-8080}:8080"
     volumes:
       # Orchestrator's own state (last-known workspace sizes for the N4 monitor).
       # NOT the users' data — the quota monitor reads usage through the runner's
@@ -197,7 +221,14 @@ services:
       OPEN_TERMINAL_SESSION_CWD_TTL: ${OPEN_TERMINAL_SESSION_CWD_TTL:-604800}
 
       # --- future dependency proxy (empty default, no egress hole) ------------
-      PIP_INDEX_URL: ${PIP_INDEX_URL:-}
+      # --- Package Seam (ADR-0008) -------------------------------------------
+      # Empty by default. DEVGUARD_ENABLED=true derives both from
+      # DEVGUARD_BASE_URL; explicit values always win.
+      DEVGUARD_ENABLED:    ${DEVGUARD_ENABLED:-false}
+      DEVGUARD_BASE_URL:   ${DEVGUARD_BASE_URL:-http://devguard-api:8080}
+      PIP_INDEX_URL:       ${PIP_INDEX_URL:-}
+      PIP_TRUSTED_HOST:    ${PIP_TRUSTED_HOST:-}
+      NPM_CONFIG_REGISTRY: ${NPM_CONFIG_REGISTRY:-}
 
       # --- plumbing -----------------------------------------------------------
       # Headroom left free on the host AFTER admitting a runner (R3). Without
@@ -231,3 +262,122 @@ services:
       args:
         OPENCODE_VERSION: ${OPENCODE_VERSION:-1.18.31}
     image: ${RUNNER_IMAGE:-owui-agent-runner:dev}
+
+  # ===========================================================================
+  #  DevGuard platform (ADR-0007) — `--profile devguard`
+  #
+  #  Upstream ships no production compose: their docker-compose.yaml is
+  #  dev-only (postgres + kratos + jaeger, no API, no web). These services are
+  #  synthesised from the helm chart at appVersion v1.14.0, which is the real
+  #  deployment artifact.
+  #
+  #  Only devguard-api touches `runners`, and only devguard-api touches
+  #  `devguard-egress`. That single dual-homed service IS the chokepoint.
+  # ===========================================================================
+
+  devguard-postgres:
+    profiles: ["devguard"]
+    image: ghcr.io/l3montree-dev/devguard/postgresql:16.15
+    restart: unless-stopped
+    shm_size: 1g
+    networks: [devguard-internal]
+    environment:
+      POSTGRES_USER: devguard
+      POSTGRES_PASSWORD: ${DEVGUARD_DB_PASSWORD:?set DEVGUARD_DB_PASSWORD in .env}
+      POSTGRES_DB: devguard
+    volumes:
+      - devguard-pg:/var/lib/postgresql/data
+      - ./devguard/initdb.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    tmpfs: /run/postgresql:rw,uid=999,gid=999
+    security_opt: [no-new-privileges, apparmor=unconfined]
+    mem_limit: ${DEVGUARD_PG_MEMORY:-512m}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U devguard"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  devguard-kratos-migrate:
+    profiles: ["devguard"]
+    image: ghcr.io/l3montree-dev/devguard/kratos:v26.2.0
+    networks: [devguard-internal]
+    depends_on:
+      devguard-postgres: {condition: service_healthy}
+    environment:
+      DSN: postgres://kratos:${DEVGUARD_DB_PASSWORD}@devguard-postgres:5432/kratos?sslmode=disable
+    volumes: ["./devguard/kratos:/etc/config/kratos:ro"]
+    command: -c /etc/config/kratos/kratos.yml migrate sql -e --yes
+    security_opt: [no-new-privileges, apparmor=unconfined]
+    restart: on-failure
+
+  devguard-kratos:
+    profiles: ["devguard"]
+    image: ghcr.io/l3montree-dev/devguard/kratos:v26.2.0
+    restart: unless-stopped
+    networks:
+      devguard-internal: {aliases: [kratos]}
+    depends_on:
+      devguard-kratos-migrate: {condition: service_completed_successfully}
+    environment:
+      DSN: postgres://kratos:${DEVGUARD_DB_PASSWORD}@devguard-postgres:5432/kratos?sslmode=disable
+      LOG_LEVEL: ${DEVGUARD_KRATOS_LOG_LEVEL:-warning}
+    volumes: ["./devguard/kratos:/etc/config/kratos:ro"]
+    command: serve -c /etc/config/kratos/kratos.yml --watch-courier
+    security_opt: [no-new-privileges, apparmor=unconfined]
+    mem_limit: ${DEVGUARD_KRATOS_MEMORY:-256m}
+
+  devguard-api:
+    profiles: ["devguard"]
+    image: ghcr.io/l3montree-dev/devguard:${DEVGUARD_VERSION:-v1.14.0}
+    restart: unless-stopped
+    # THE chokepoint: reachable by runners, and the only thing with upstream.
+    networks:
+      runners: {aliases: [devguard-api]}
+      devguard-internal: {}
+      devguard-egress: {}
+    depends_on:
+      devguard-postgres: {condition: service_healthy}
+      devguard-kratos: {condition: service_started}
+    environment:
+      POSTGRES_HOST: devguard-postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: devguard
+      POSTGRES_PASSWORD: ${DEVGUARD_DB_PASSWORD}
+      POSTGRES_DB: devguard
+      ORY_KRATOS_PUBLIC: http://kratos:4433
+      ORY_KRATOS_ADMIN: http://kratos:4434
+      INSTANCE_DOMAIN: ${DEVGUARD_INSTANCE_DOMAIN:-http://devguard-api:8080}
+      FRONTEND_URL: ${DEVGUARD_FRONTEND_URL:-http://devguard-web:3000}
+      API_URL: ${DEVGUARD_API_URL:-http://devguard-api:8080}
+      # The dependency-proxy cache. Chart default is 4096; 2048 chosen here.
+      DEPENDENCY_PROXY_CACHE_DIR: /cache
+      DEPENDENCY_PROXY_CACHE_MAX_SIZE_MB: ${DEVGUARD_PROXY_CACHE_MB:-2048}
+      APP_SIDE_ENCRYPTION_KEY_PATH: /encryption/key
+      GOMEMLIMIT: ${DEVGUARD_API_GOMEMLIMIT:-1024MiB}
+      ENVIRONMENT: ${DEVGUARD_ENVIRONMENT:-prod}
+    volumes:
+      - devguard-cache:/cache
+      - ./devguard/encryption-key:/encryption/key:ro
+    security_opt: [no-new-privileges, apparmor=unconfined]
+    mem_limit: ${DEVGUARD_API_MEMORY:-2048m}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/api/v1/health >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 90s
+
+  devguard-web:
+    profiles: ["devguard"]
+    image: ghcr.io/l3montree-dev/devguard-web:${DEVGUARD_VERSION:-v1.14.0}
+    restart: unless-stopped
+    # Internal-only by operator decision: no ports published. Reach it with
+    # `docker compose exec` or a temporary port-forward when you need the UI.
+    networks: [devguard-internal]
+    depends_on:
+      devguard-api: {condition: service_started}
+    environment:
+      DEVGUARD_API_URL: ${DEVGUARD_API_URL:-http://devguard-api:8080}
+      NEXT_PUBLIC_API_URL: ${DEVGUARD_API_URL:-http://devguard-api:8080}
+    security_opt: [no-new-privileges, apparmor=unconfined]
+    mem_limit: ${DEVGUARD_WEB_MEMORY:-256m}

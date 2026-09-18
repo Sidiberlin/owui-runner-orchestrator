@@ -147,6 +147,11 @@ async def status() -> dict:
         "workspace_total_known_mb": mgr.quota.total_known() // 1024**2,
         "workspace_ceiling_mb": cfg.total_ceiling // 1024**2,
         "volume_retention_days": cfg.retention_days,
+        "devguard_enabled": cfg.devguard_enabled,
+        "package_seam": {
+            "pip_index_url": cfg.pip_index_url or None,
+            "npm_registry": cfg.npm_registry or None,
+        },
         "idle_timeout_s": cfg.idle_timeout,
         "deny_prefixes": list(cfg.proxy_deny_prefixes),
         "runner_image": cfg.runner_image,

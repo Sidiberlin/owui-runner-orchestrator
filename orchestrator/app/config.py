@@ -30,6 +30,35 @@ def _req(name: str) -> str:
     return val
 
 
+def _package_seam() -> dict:
+    """Resolve the Package Seam: the single surface through which package
+    traffic reaches runners (ADR-0008).
+
+    Precedence is deliberate — an explicit value ALWAYS wins, so an operator
+    can point at something other than DevGuard without editing code. Enabling
+    DevGuard only supplies defaults.
+
+    Paths verified against upstream: pip is
+    /api/v1/dependency-proxy/pypi/simple (with PIP_TRUSTED_HOST, since the hop
+    is plain http). The npm path is the less certain of the two — upstream
+    issue #3022 is literally "Wrong dependency proxy URLs" — so it is
+    overridable and asserted by a live test rather than trusted blindly.
+    """
+    enabled = os.getenv("DEVGUARD_ENABLED", "false").strip().lower() in (
+        "1", "true", "yes", "on")
+    base = os.getenv("DEVGUARD_BASE_URL", "http://devguard-api:8080").rstrip("/")
+    pip = os.getenv("PIP_INDEX_URL", "").strip()
+    npm = os.getenv("NPM_CONFIG_REGISTRY", "").strip()
+    host = os.getenv("PIP_TRUSTED_HOST", "").strip()
+    if enabled:
+        pip = pip or f"{base}/api/v1/dependency-proxy/pypi/simple"
+        npm = npm or f"{base}/api/v1/dependency-proxy/npm"
+        if not host:
+            host = base.split("//", 1)[-1].split("/", 1)[0].split(":", 1)[0]
+    return {"pip_index_url": pip, "pip_trusted_host": host,
+            "npm_registry": npm, "devguard_enabled": enabled}
+
+
 def _csv(name: str, default: str) -> list[str]:
     raw = os.getenv(name, "").strip() or default
     return [p.strip() for p in raw.split(",") if p.strip()]
@@ -96,7 +125,11 @@ class Config:
     ot_max_sessions: int = 8
     ot_execute_timeout: int = 120
     ot_session_cwd_ttl: int = 604800
+    # --- Package Seam (ADR-0008) -------------------------------------------
     pip_index_url: str = ""
+    pip_trusted_host: str = ""
+    npm_registry: str = ""
+    devguard_enabled: bool = False
 
     # --- plumbing ----------------------------------------------------------
     # --- per-role policy (the v2 group-permission injection point) ---------
@@ -152,7 +185,7 @@ class Config:
             ot_max_sessions=_int("OPEN_TERMINAL_MAX_SESSIONS", 8),
             ot_execute_timeout=_int("OPEN_TERMINAL_EXECUTE_TIMEOUT", 120),
             ot_session_cwd_ttl=_int("OPEN_TERMINAL_SESSION_CWD_TTL", 604800),
-            pip_index_url=os.getenv("PIP_INDEX_URL", ""),
+            **_package_seam(),
             # Admin limits default to the user limits, so "higher limits for
             # admin" is opt-in rather than an accidental capacity hole.
             admin_nano_cpus=int(

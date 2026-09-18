@@ -402,8 +402,15 @@ class RunnerManager:
             "OPEN_TERMINAL_EXECUTE_TIMEOUT": str(self.cfg.ot_execute_timeout),
             "OPEN_TERMINAL_SESSION_CWD_TTL": str(self.cfg.ot_session_cwd_ttl),
         }
+        # Package Seam (ADR-0008). Empty unless configured; there is no second
+        # path by which a runner could reach a public registry.
         if self.cfg.pip_index_url:
             env["PIP_INDEX_URL"] = self.cfg.pip_index_url
+            # pip refuses a plain-http index without this.
+            if self.cfg.pip_trusted_host:
+                env["PIP_TRUSTED_HOST"] = self.cfg.pip_trusted_host
+        if self.cfg.npm_registry:
+            env["NPM_CONFIG_REGISTRY"] = self.cfg.npm_registry
         # N9: OPEN_TERMINAL_ALLOWED_DOMAINS is deliberately never set. Setting
         # it activates the entrypoint's iptables firewall, which needs
         # CAP_NET_ADMIN we do not grant. `internal: true` is the real control.

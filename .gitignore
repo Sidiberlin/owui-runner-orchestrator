@@ -16,3 +16,4 @@ data/
 
 *.log
 *.pid
+devguard/encryption-key
