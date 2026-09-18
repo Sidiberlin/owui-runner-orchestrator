@@ -45,6 +45,10 @@ class QuotaExceeded(RuntimeError):
 class Sample:
     bytes_used: int
     at: float
+    # Last time this uid actually used its runner. Distinct from `at`, which is
+    # only when we last measured. Retention must key off real activity, or a
+    # measurement sweep would keep dead workspaces alive forever.
+    seen: float = 0.0
 
 
 class MonitorQuota:
@@ -62,7 +66,9 @@ class MonitorQuota:
             with open(self._path) as fh:
                 raw = json.load(fh)
             self._samples = {
-                k: Sample(int(v["bytes_used"]), float(v["at"])) for k, v in raw.items()
+                k: Sample(int(v["bytes_used"]), float(v["at"]),
+                          float(v.get("seen", 0.0)))
+                for k, v in raw.items()
             }
             log.info("quota: loaded %d cached workspace sizes", len(self._samples))
         except FileNotFoundError:
@@ -76,7 +82,7 @@ class MonitorQuota:
             os.makedirs(os.path.dirname(self._path), exist_ok=True)
             with open(tmp, "w") as fh:
                 json.dump(
-                    {k: {"bytes_used": s.bytes_used, "at": s.at}
+                    {k: {"bytes_used": s.bytes_used, "at": s.at, "seen": s.seen}
                      for k, s in self._samples.items()},
                     fh,
                 )
@@ -93,7 +99,25 @@ class MonitorQuota:
         return sum(s.bytes_used for s in self._samples.values())
 
     def record(self, uid: str, used: int) -> None:
-        self._samples[uid] = Sample(used, time.time())
+        prev = self._samples.get(uid)
+        self._samples[uid] = Sample(used, time.time(), prev.seen if prev else 0.0)
+        self._save()
+
+    def note_activity(self, uid: str) -> None:
+        """Mark a uid as active now. Cheap and in-memory; persisted on the next
+        measurement or sweep, which is frequent enough for a day-scale policy."""
+        s = self._samples.get(uid)
+        if s is None:
+            self._samples[uid] = Sample(0, 0.0, time.time())
+            self._save()
+        else:
+            s.seen = time.time()
+
+    def last_activity(self, uid: str) -> float:
+        s = self._samples.get(uid)
+        return s.seen if s else 0.0
+
+    def flush(self) -> None:
         self._save()
 
     def forget(self, uid: str) -> None:

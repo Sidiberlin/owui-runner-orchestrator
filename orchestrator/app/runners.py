@@ -274,6 +274,10 @@ class RunnerManager:
         r = self._runners.get(uid)
         if r:
             r.last_seen = time.time()
+        # Recorded even without a live runner: a request that fails admission
+        # still proves the account is in use, and must protect its workspace
+        # from the retention sweep.
+        self.quota.note_activity(uid)
 
     @contextlib.asynccontextmanager
     async def serving(self, uid: str):
@@ -289,6 +293,7 @@ class RunnerManager:
         if r is not None:
             r.in_flight += 1
             r.last_seen = time.time()
+        self.quota.note_activity(uid)
         try:
             yield
         finally:

@@ -77,6 +77,7 @@ async def lifespan(app: FastAPI):
     tasks = [
         asyncio.create_task(workers.idle_worker(mgr), name="idle"),
         asyncio.create_task(workers.quota_worker(mgr), name="quota"),
+        asyncio.create_task(workers.retention_worker(mgr), name="retention"),
     ]
     log.info(
         "ready: max_containers=%d runner_mem=%dMiB idle=%.0fs deny=%s image=%s",
@@ -145,6 +146,7 @@ async def status() -> dict:
         "committed_memory_mb": mgr.committed_memory() // 1024**2,
         "workspace_total_known_mb": mgr.quota.total_known() // 1024**2,
         "workspace_ceiling_mb": cfg.total_ceiling // 1024**2,
+        "volume_retention_days": cfg.retention_days,
         "idle_timeout_s": cfg.idle_timeout,
         "deny_prefixes": list(cfg.proxy_deny_prefixes),
         "runner_image": cfg.runner_image,
@@ -165,6 +167,21 @@ async def list_runners() -> list[dict]:
         }
         for r in mgr.all()
     ]
+
+
+@app.post("/_orch/retention/sweep", dependencies=[Depends(require_orch_key)])
+async def retention_sweep(dry_run: bool = True) -> dict:
+    """Run one R2 sweep. Defaults to dry_run so an operator can see what a
+    policy would delete before trusting it."""
+    mgr, cfg = _mgr(), _cfg()
+    acted = await workers.retention_sweep(mgr, dry_run=dry_run)
+    return {
+        "retention_days": cfg.retention_days,
+        "enabled": cfg.retention_days > 0,
+        "dry_run": dry_run,
+        "count": len(acted),
+        "volumes": acted,
+    }
 
 
 @app.delete("/_orch/runners/{uid}", dependencies=[Depends(require_orch_key)])

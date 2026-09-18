@@ -172,6 +172,10 @@ services:
       # How often the idle sweep runs. Teardown latency is at worst
       # IDLE_TIMEOUT + this.
       IDLE_SWEEP_INTERVAL:     ${IDLE_SWEEP_INTERVAL:-30}
+      # R2 retention. 0 = never delete (default). This destroys user data, so
+      # it is opt-in.
+      VOLUME_RETENTION_DAYS:     ${VOLUME_RETENTION_DAYS:-0}
+      RETENTION_SWEEP_INTERVAL:  ${RETENTION_SWEEP_INTERVAL:-3600}
 
       # --- per-role policy (Lane C) -------------------------------------------
       # Default to the user limits, so "admin gets higher limits" is opt-in

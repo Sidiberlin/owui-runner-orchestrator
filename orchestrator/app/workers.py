@@ -101,3 +101,76 @@ async def quota_worker(mgr: RunnerManager) -> None:
             raise
         except Exception:  # noqa: BLE001
             log.exception("quota worker iteration failed; continuing")
+
+
+async def retention_sweep(mgr: RunnerManager, dry_run: bool = False) -> list[dict]:
+    """One retention pass. Returns what was (or would be) deleted.
+
+    Split out of the worker so it can be driven deterministically by tests and
+    by `POST /_orch/retention/sweep?dry_run=true`, which is the safe way to see
+    what a policy would do before enabling it.
+
+    Three guards, in order of how badly each would hurt if missing:
+
+    1. **Scoped to this orchestrator's network.** N27 proved two stacks on one
+       host act on each other's resources when the filter is the managed label
+       alone. There it cost a live session; here it would cost data.
+    2. **Never a live runner.**
+    3. **Never a uid with no activity record** — its clock is started instead,
+       so a fresh orchestrator or a restored state file cannot delete on first
+       sight. Worst case that grants one extra retention period, which is the
+       right direction to be wrong in.
+    """
+    from . import volumes as V
+
+    days = mgr.cfg.retention_days
+    if days <= 0:
+        return []
+    cutoff, now, out = days * 86400.0, time.time(), []
+
+    for vol in await V.list_workspace_volumes(mgr.client, mgr.cfg.runners_network):
+        uid, name = V.volume_uid(vol), vol.get("Name") or ""
+        if not uid or not name:
+            continue
+        if mgr.get(uid) is not None:
+            continue
+        seen = mgr.quota.last_activity(uid)
+        if not seen:
+            mgr.quota.note_activity(uid)
+            log.info("retention: first sight of %s, starting its clock", name)
+            continue
+        idle = now - seen
+        if idle < cutoff:
+            continue
+        entry = {
+            "volume": name, "uid": uid,
+            "idle_days": round(idle / 86400.0, 2),
+            "size_mb": mgr.quota.last_known(uid) // 1024**2,
+        }
+        out.append(entry)
+        if dry_run:
+            continue
+        log.warning(
+            "retention: deleting %s (uid=%s, inactive %.1f days, policy %.1f)",
+            name, uid, idle / 86400.0, days,
+        )
+        await V.remove_volume(mgr.client, name)
+        mgr.quota.forget(uid)
+    if out and not dry_run:
+        mgr.quota.flush()
+        log.warning("retention: deleted %d workspace volume(s)", len(out))
+    return out
+
+
+async def retention_worker(mgr: RunnerManager) -> None:
+    """Periodic R2 sweep. Disabled unless VOLUME_RETENTION_DAYS > 0 — this
+    deletes user data, so it is opt-in rather than something an operator
+    discovers after the fact."""
+    while True:
+        try:
+            await asyncio.sleep(mgr.cfg.retention_sweep_interval)
+            await retention_sweep(mgr)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            log.exception("retention worker iteration failed; continuing")

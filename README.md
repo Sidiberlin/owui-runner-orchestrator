@@ -328,6 +328,42 @@ give it a distinct `RUNNERS_NETWORK` — the compose default already does.
 A runner with **no** owner label is treated as legacy and reaped so a labelled
 one replaces it. Workspace volumes are untouched.
 
+### Dependency installs without egress (DevGuard seam)
+
+Runners have zero egress, so `pip install` cannot reach PyPI. `PIP_INDEX_URL`
+is injected into every runner at **create time** (empty by default, so it is
+inert until you use it).
+
+The intended shape: run a DevGuard dependency-proxy container **on the same
+`runners-internal` network** and point this at it:
+
+```
+PIP_INDEX_URL=http://devguard:3141/root/pypi/+simple/
+```
+
+The proxy is reachable because it sits inside the isolated network, not because
+the network was loosened. **No egress hole is ever opened** — that was the
+point of the seam. Changing it takes effect on each runner's next spawn.
+
+### Workspace retention (R2)
+
+Two independent controls:
+
+| Knob | Effect |
+|---|---|
+| `WORKSPACE_TOTAL_CEILING` | Enforced at **admission**. Once the known total reaches it, new spawns get a clean **429** rather than filling the host. |
+| `VOLUME_RETENTION_DAYS` | Periodic sweep deleting workspaces for users inactive beyond it. **`0` = never delete (default).** |
+
+Retention is off by default because it destroys user data. When enabled, the
+sweep has three guards and logs every deletion with the uid, idle days and size:
+
+1. Scoped to this orchestrator's `RUNNERS_NETWORK` — it can never touch another
+   stack's volumes (see N27 for why that guard is not theoretical).
+2. Never a uid with a live runner.
+3. Never a uid it has no activity record for — it starts that uid's clock and
+   skips. A fresh orchestrator or restored state file cannot delete on first
+   sight; worst case that grants one extra retention period.
+
 ### Rolling the runner image
 
 Bump `RUNNER_VERSION`. Reconciliation reaps every runner carrying the old

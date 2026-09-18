@@ -88,6 +88,8 @@ class Config:
     disk_hard: int = 0
     total_ceiling: int = 0
     disk_poll_interval: int = 60
+    retention_days: float = 0.0
+    retention_sweep_interval: int = 3600
     idle_sweep_interval: float = 30.0
 
     # --- Open Terminal passthrough (C6) -----------------------------------
@@ -142,6 +144,10 @@ class Config:
             disk_hard=parse_size(os.getenv("RUNNER_DISK_HARD", "6g")),
             total_ceiling=parse_size(os.getenv("WORKSPACE_TOTAL_CEILING", "60g")),
             disk_poll_interval=_int("DISK_POLL_INTERVAL", 60),
+            # 0 disables deletion entirely. Defaulting a data-destroying policy
+            # to OFF is deliberate: it must be an explicit operator choice.
+            retention_days=_float("VOLUME_RETENTION_DAYS", 0.0),
+            retention_sweep_interval=_int("RETENTION_SWEEP_INTERVAL", 3600),
             idle_sweep_interval=_float("IDLE_SWEEP_INTERVAL", 30.0),
             ot_max_sessions=_int("OPEN_TERMINAL_MAX_SESSIONS", 8),
             ot_execute_timeout=_int("OPEN_TERMINAL_EXECUTE_TIMEOUT", 120),

@@ -17,6 +17,7 @@ OWNERSHIP (C5/N8)
 """
 from __future__ import annotations
 
+import json
 import logging
 
 import aiodocker
@@ -53,11 +54,26 @@ async def ensure_volume(
     return name
 
 
-async def list_workspace_volumes(client: aiodocker.Docker) -> list[dict]:
-    data = await client._query_json(
-        "volumes", method="GET", params={"filters": f'{{"label":["{L.MANAGED}={L.MANAGED_VALUE}"]}}'}
-    )
+async def list_workspace_volumes(
+    client: aiodocker.Docker, network: str = ""
+) -> list[dict]:
+    """List workspace volumes, scoped to one orchestrator when `network` is set.
+
+    The scoping is not optional for anything that DELETES. N27 showed two
+    orchestrators on one host will happily act on each other's resources when
+    the filter is the managed label alone; for containers that cost a live
+    session, for volumes it would cost a user's data.
+    """
+    labels = [f"{L.MANAGED}={L.MANAGED_VALUE}"]
+    if network:
+        labels.append(f"{L.NETWORK}={network}")
+    flt = json.dumps({"label": labels})
+    data = await client._query_json("volumes", method="GET", params={"filters": flt})
     return data.get("Volumes") or []
+
+
+def volume_uid(vol: dict) -> str | None:
+    return ((vol.get("Labels") or {}).get(L.UID))
 
 
 async def remove_volume(client: aiodocker.Docker, name: str) -> None:
