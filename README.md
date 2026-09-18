@@ -132,8 +132,17 @@ measured on the wire, not inferred.
 
 | id | url | origin |
 |---|---|---|
-| `orch-lxc64` | `http://<orch-host>:8080` | **created during this integration** |
+| `orch-lxc64` | `http://<orch-host>:8080` | created during the original integration — **URL now historical, see below** |
 | `lxc101-terminal` | `http://open-terminal:8000` | pre-existing, untouched |
+
+> **Consolidated onto one host (ADR-0006).** The orchestrator no longer runs
+> on <orch-host>; that stack was torn down after its workspace volumes were
+> migrated. Everything now runs on <owui-host>, where OWUI reaches the
+> orchestrator over the shared `owui` network by name
+> (`http://orchestrator:8080`) with no LAN hop and no published port. The
+> connection's stored URL is repointed separately from this repo — the `.64`
+> address above is kept only so the original integration record still reads
+> correctly. The `id` is unchanged, so the route prefix below still applies.
 
 `orch-lxc64`'s stored key matches this repo's `.env` `ORCH_API_KEY`. The
 `lxc101-terminal` entry is a separate plain Open Terminal on the OWUI host and
