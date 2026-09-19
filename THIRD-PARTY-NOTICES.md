@@ -14,6 +14,10 @@
 > public package metadata but was **not** independently re-verified line by
 > line this session — flagged below.
 
+**Review status:** Reviewed 2026-09-19 by independent subagent review
+(Hermes delegation): 37 rows re-derived from tree and primary sources; 2
+discrepancies found, fixed same day as prescribed.
+
 This project (MIT, see `LICENSE`) is a self-hosted alternative to Open WebUI's
 commercial Terminals orchestrator, built against Open WebUI's documented
 integration surface only (clean-room; see the hard constraints below). It
@@ -90,6 +94,7 @@ what retires `pip-shim` (see `docs/adr/0010-pip-index-rewriter.md` and
 | Component | Version pinned | SPDX | Copyright | Distribution |
 |---|---|---|---|---|
 | Node.js (official prebuilt tarball) | 22.14.0 (`runner/Dockerfile` `NODE_VERSION`) | `MIT` (Node.js's own top-level `LICENSE`); the official binary distribution additionally bundles several third-party components (V8, npm, etc.) each under its own license — see `nodejs/node`'s `LICENSE` file for the full list, not reproduced here | © Node.js contributors | Vendored: official `.tar.gz` fetched from `nodejs.org` at build time, unmodified, copied into `runner/Dockerfile`'s runtime stage |
+| pip | as installed at build (measured: **25.0.1** in the runner image, **26.2.1** in the orchestrator image — different bootstrap paths land different current versions) | `MIT` | © PyPA (Python Packaging Authority) contributors | Vendored in **both** images, via two different routes: the runner gets it from the base image's own `ensurepip` (`runner/Dockerfile`); the orchestrator gets it from the `get-pip.py` venv bootstrap required by the zends base (ticket 12, `orchestrator/Dockerfile`) |
 
 ## Python dependencies (orchestrator image, `orchestrator/requirements.txt`)
 
@@ -130,7 +135,7 @@ re-verified line-by-line this session** — part of the ticket 08 review gate:
 | watchfiles | `MIT` |
 | websockets | `BSD-3-Clause` |
 | python-dotenv | `BSD-3-Clause` |
-| aiohttp | `Apache-2.0` |
+| aiohttp | `Apache-2.0 AND MIT` — bundles vendored `llhttp` (`MIT`, © 2018 Fedor Indutny) |
 | multidict, yarl, frozenlist, aiosignal, propcache | `Apache-2.0` |
 | attrs | `MIT` |
 | aiohappyeyeballs | `PSF-2.0` |
