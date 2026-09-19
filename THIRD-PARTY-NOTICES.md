@@ -69,6 +69,22 @@ patches DevGuard's own source (as opposed to configuring/deploying the
 published image), that changes the analysis and would need AGPL source
 disclosure for those modifications.
 
+**Clarification: `pip-shim` is not a DevGuard modification.** ADR-0010's
+`pip-shim` sidecar could look, at a glance, like exactly the kind of
+DevGuard patch the paragraph above warns about — it is not. `pip-shim` is
+this project's own MIT-licensed nginx config (`devguard/pip-shim/default.conf`)
+running in an *adjacent* container (`nginx:1.27-alpine`, unmodified — see the
+container table above), rewriting the HTTP responses DevGuard serves to pip
+clients on their way past. DevGuard itself continues to run as the stock,
+unmodified upstream image throughout; no DevGuard source, binary, or config
+is patched, forked, or redistributed. The proper fix is upstream:
+[l3montree-dev/devguard#3067](https://github.com/l3montree-dev/devguard/issues/3067)
+tracks rewriting the simple index natively in DevGuard, and its merge is
+what retires `pip-shim` (see `docs/adr/0010-pip-index-rewriter.md` and
+`docs/upstream/devguard-pypi-index-passthrough.md`).
+
+**Stakeholder ratified this unmodified-deployment analysis on 2026-09-19.**
+
 ## Vendored at build time (not a container image)
 
 | Component | Version pinned | SPDX | Copyright | Distribution |
