@@ -5,6 +5,16 @@ from conftest import runner_name_for, sh
 
 pytestmark = pytest.mark.integration
 
+# Ticket 16: this was a zero-margin timing race. The client's own httpx
+# timeout used to equal the server-side `wait` exactly, so ANY overhead -
+# network, the orchestrator's proxy hop, GC, a loaded host - made the
+# client give up a moment before the server would have answered: a false
+# failure, not a real one (confirmed: passed cleanly on every retry). The
+# margin gives the client real slack without changing what the test
+# proves (the runner is OOM-killed inside its cgroup, not the host).
+WAIT_SECONDS = 60
+TIMEOUT_MARGIN_SECONDS = 30
+
 
 @pytest.fixture
 def runner(api, stack, uid, cleanup_runners):
@@ -48,7 +58,7 @@ def test_over_allocating_memory_is_killed_not_swapped_onto_the_host(
     agent must die inside its own cgroup."""
     r = api.post("/execute", headers=stack.user_headers(runner), json={
         "command": "python3 -c \"b=bytearray(600*1024*1024); print(len(b))\"",
-        "wait": 60})
+        "wait": WAIT_SECONDS}, timeout=WAIT_SECONDS + TIMEOUT_MARGIN_SECONDS)
     body = r.json()
     assert body.get("exit_code") not in (0, None), (
         f"600 MiB allocation succeeded inside a 320 MiB runner: {body}")
