@@ -30,6 +30,15 @@ COPY requirements.txt .
 # --without-pip + get-pip.py is the verified working route. wget is present;
 # curl is not (both measured).
 #
+# Nix-base /etc fix (measured 2026-09-19, live): the ZenDiS base symlinks
+# /etc/passwd and /etc/group into /nix/store, which makes runc's exec path
+# validation fail ("openat etc/group: path escapes from parent") — killing
+# docker exec AND any Docker healthcheck. Replace the symlinks with real
+# files (content dereferenced); nss lookups are unaffected by the swap.
+USER root
+RUN for f in passwd group; do cp -L "/etc/$f" "/etc/$f.real" && rm "/etc/$f" && mv "/etc/$f.real" "/etc/$f"; done
+USER 53111:53111
+
 # get-pip.py is unversioned (bootstrap.pypa.io always serves the current
 # bootstrapper, unlike a tagged release) - sha256-verify it the same way D2
 # required for the opencode installer: a rebuild fails loudly on a checksum
