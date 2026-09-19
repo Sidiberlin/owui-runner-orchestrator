@@ -13,6 +13,12 @@ ENDPOINT, VERIFIED AGAINST OWUI SOURCE (routers/users.py)
     the brief asked for: Policy below is the one place to widen, and nothing
     upstream of it needs to change.
 
+    v2 prefactor (docs/adr/0012, "group names not ids"): Policy.groups now
+    carries each group's *name* — the field GROUP_MAP will match against —
+    and Policy.group_ids carries the same membership's ids alongside it, kept
+    as the stable identifier for diagnostics. Both come from this same
+    response; no extra OWUI round trip is introduced.
+
 FAIL-CLOSED (A8)
     A role we cannot verify is not a role. On any OWUI failure we serve a
     cached answer for up to ROLE_CACHE_GRACE, then refuse with 503. We never
@@ -44,12 +50,35 @@ class RoleUnavailable(RuntimeError):
     """Role could not be resolved and no usable cached answer exists (503)."""
 
 
+def _parse_groups(raw: object) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """OWUI's `groups: [{id, name}]` -> (names, ids), same order, index-paired.
+
+    Tolerant by construction, matching the pre-existing id-only parse this
+    replaces: a non-dict entry, or a dict missing either `id` or `name`, is
+    skipped rather than raising. A group entry is only as useful as its
+    weakest field — an id we cannot match by name, or a name with no stable
+    id behind it, is not worth carrying half of.
+    """
+    names: list[str] = []
+    ids: list[str] = []
+    for g in raw or []:
+        if not isinstance(g, dict):
+            continue
+        gid, gname = g.get("id"), g.get("name")
+        if not gid or not gname:
+            continue
+        ids.append(str(gid))
+        names.append(str(gname))
+    return tuple(names), tuple(ids)
+
+
 @dataclass(frozen=True)
 class Policy:
     """What this identity is allowed to have. Widen here for v2 groups."""
     uid: str
     role: str
-    groups: tuple[str, ...] = ()
+    groups: tuple[str, ...] = ()       # group NAMES — the v2 GROUP_MAP match key
+    group_ids: tuple[str, ...] = ()    # same membership's ids, for diagnostics
     nano_cpus: int = 0
     memory: int = 0
     disk_soft: int = 0
@@ -59,6 +88,7 @@ class Policy:
 class _Entry:
     role: str
     groups: tuple[str, ...]
+    group_ids: tuple[str, ...]
     at: float
 
 
@@ -75,22 +105,23 @@ class RoleMapper:
     async def aclose(self) -> None:
         await self._client.aclose()
 
-    def _policy(self, uid: str, role: str, groups: tuple[str, ...]) -> Policy:
+    def _policy(self, uid: str, role: str, groups: tuple[str, ...],
+                group_ids: tuple[str, ...]) -> Policy:
         if role == ROLE_ADMIN:
             return Policy(
-                uid, role, groups,
+                uid, role, groups, group_ids,
                 nano_cpus=self.cfg.admin_nano_cpus,
                 memory=self.cfg.admin_memory,
                 disk_soft=self.cfg.admin_disk_soft,
             )
         return Policy(
-            uid, role, groups,
+            uid, role, groups, group_ids,
             nano_cpus=self.cfg.runner_nano_cpus,
             memory=self.cfg.runner_memory,
             disk_soft=self.cfg.disk_soft,
         )
 
-    async def _fetch(self, uid: str) -> tuple[str, tuple[str, ...]]:
+    async def _fetch(self, uid: str) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
         r = await self._client.get(f"/api/v1/users/{uid}")
         if r.status_code in (400, 404):
             # OWUI answers 400 for USER_NOT_FOUND. Authoritative "no such user".
@@ -108,21 +139,17 @@ class RoleMapper:
         if not isinstance(body, dict):
             raise RoleUnavailable("unexpected OWUI response shape")
         role = str(body.get("role") or ROLE_PENDING).lower()
-        groups = tuple(
-            str(g.get("id"))
-            for g in (body.get("groups") or [])
-            if isinstance(g, dict) and g.get("id")
-        )
-        return role, groups
+        groups, group_ids = _parse_groups(body.get("groups"))
+        return role, groups, group_ids
 
     async def resolve(self, uid: str) -> Policy:
         now = time.time()
         cached = self._cache.get(uid)
         if cached and now - cached.at < self.cfg.role_cache_ttl:
-            return self._gate(uid, cached.role, cached.groups)
+            return self._gate(uid, cached.role, cached.groups, cached.group_ids)
 
         try:
-            role, groups = await self._fetch(uid)
+            role, groups, group_ids = await self._fetch(uid)
         except AccessDenied:
             # Authoritative denial: drop any cached grant immediately so a
             # deleted account cannot ride out the grace window.
@@ -134,16 +161,17 @@ class RoleMapper:
                     "OWUI unreachable (%s); serving %s's cached role for %.0fs more",
                     exc, uid, self.cfg.role_cache_grace - (now - cached.at),
                 )
-                return self._gate(uid, cached.role, cached.groups)
+                return self._gate(uid, cached.role, cached.groups, cached.group_ids)
             log.error("OWUI unreachable (%s) and no usable cache for %s", exc, uid)
             raise RoleUnavailable(
                 "cannot verify your account with Open WebUI right now"
             ) from exc
 
-        self._cache[uid] = _Entry(role, groups, now)
-        return self._gate(uid, role, groups)
+        self._cache[uid] = _Entry(role, groups, group_ids, now)
+        return self._gate(uid, role, groups, group_ids)
 
-    def _gate(self, uid: str, role: str, groups: tuple[str, ...]) -> Policy:
+    def _gate(self, uid: str, role: str, groups: tuple[str, ...],
+              group_ids: tuple[str, ...]) -> Policy:
         if role == ROLE_PENDING:
             raise AccessDenied(
                 "your Open WebUI account is still pending admin approval"
@@ -152,4 +180,4 @@ class RoleMapper:
             # Unknown future role: deny rather than guess. Adding a role is a
             # deliberate act, not something that should happen by omission.
             raise AccessDenied(f"role {role!r} is not permitted to use runners")
-        return self._policy(uid, role, groups)
+        return self._policy(uid, role, groups, group_ids)

@@ -13,15 +13,33 @@ collide with another test's runner:
     p-<anything>  -> pending     x-<anything>  -> auditor (an unknown role)
 
 The fixed names alice / adam / pat / weird are kept for manual poking.
+
+Group membership (ticket 02, docs/adr/0012 "group names not ids") is chosen
+by a uid *substring*, independent of role, so a single test can pick a shape
+without perturbing the role-prefix convention above:
+
+    nogroups     -> []                                (ungrouped)
+    multigroup   -> devs + qa                          (several groups)
+    messygroups  -> devs, qa, plus malformed entries mixed in (parser
+                    tolerance: missing id, missing name, non-dict)
+    withgroups   -> devs                                (used to prove a
+                    denied role stays denied even while it carries a group)
+
+Anything else keeps the pre-ticket-02 default: plain `user`-role accounts
+carry the sample "devs" group, everyone else carries none.
 """
 import json
 import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 TOKEN = os.getenv("STUB_TOKEN", "stub-admin-token")
+PORT = int(os.getenv("STUB_PORT", "8099"))
 
 FIXED = {"alice": "user", "adam": "admin", "pat": "pending", "weird": "auditor"}
 PREFIX = {"u-": "user", "a-": "admin", "p-": "pending", "x-": "auditor"}
+
+_DEVS = {"id": "g-devs", "name": "devs"}
+_QA = {"id": "g-qa", "name": "qa"}
 
 
 def role_for(uid: str) -> str | None:
@@ -31,6 +49,24 @@ def role_for(uid: str) -> str | None:
         if uid.startswith(pre):
             return role
     return None
+
+
+def groups_for(uid: str, role: str) -> list:
+    if "nogroups" in uid:
+        return []
+    if "multigroup" in uid:
+        return [_DEVS, _QA]
+    if "messygroups" in uid:
+        return [
+            _DEVS,
+            {"name": "no-id"},        # missing id -> skipped
+            {"id": "g-no-name"},      # missing name -> skipped
+            "not-a-dict",             # non-dict entry -> skipped
+            _QA,
+        ]
+    if "withgroups" in uid:
+        return [_DEVS]
+    return [_DEVS] if role == "user" else []
 
 
 class H(BaseHTTPRequestHandler):
@@ -60,9 +96,9 @@ class H(BaseHTTPRequestHandler):
             "email": f"{uid}@example.test",
             "name": uid,
             "role": role,
-            "groups": [{"id": "g-devs", "name": "devs"}] if role == "user" else [],
+            "groups": groups_for(uid, role),
             "is_active": True,
         })
 
 
-ThreadingHTTPServer(("0.0.0.0", 8099), H).serve_forever()
+ThreadingHTTPServer(("0.0.0.0", PORT), H).serve_forever()

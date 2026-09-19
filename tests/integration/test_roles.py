@@ -4,9 +4,18 @@ A role we cannot verify is not a role. The failure that matters is the quiet
 one: falling open to "probably a user" would let a deleted or demoted account
 keep driving a runner indefinitely while OWUI is down.
 """
+import asyncio
+import os
+import socket
+import subprocess
+import sys
 import time
 
 import pytest
+
+from app.config import Config
+from app.roles import AccessDenied, Policy, RoleMapper
+from conftest import HERE
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
 
@@ -77,3 +86,153 @@ def test_recovery_is_automatic(api, stack, uid, cleanup_runners, owui_restored):
     stack.start_owui()
     time.sleep(3)
     assert api.get("/system", headers=stack.user_headers(uid)).status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Ticket 02 (v2.0 group policy profiles, docs/adr/0012): group NAMES on the
+# resolved Policy.
+#
+# RoleMapper is pure httpx — it needs a real OWUI-shaped HTTP endpoint to
+# prove the parse, but nothing Docker provides. `stack`'s stub runs inside
+# the compose network under a name (OWUI_BASE_URL=http://stub-owui-test:...)
+# that only resolves from inside that network, so these tests run a second,
+# throwaway instance of the exact same tests/stub_owui.py directly as a host
+# subprocess and drive app.roles.RoleMapper against it. That keeps this the
+# same documented-contract stand-in the rest of the suite trusts, without
+# requiring the full stack for a prefactor that changes no external
+# behaviour (groups are not surfaced anywhere yet — see NIGHT-REPORT/ticket
+# 02: they will not be until the profile-resolution tickets that follow).
+# ---------------------------------------------------------------------------
+GROUP_STUB_PORT = 8199
+GROUP_STUB_TOKEN = "roles-prefactor-stub-token"  # noqa: S105 - test-only, throwaway
+
+
+@pytest.fixture(scope="module")
+def group_stub():
+    env = {**os.environ, "STUB_TOKEN": GROUP_STUB_TOKEN,
+           "STUB_PORT": str(GROUP_STUB_PORT)}
+    proc = subprocess.Popen(
+        [sys.executable, os.path.join(HERE, "stub_owui.py")], env=env,
+    )
+    try:
+        deadline = time.time() + 15
+        up = False
+        while time.time() < deadline:
+            try:
+                with socket.create_connection(
+                        ("127.0.0.1", GROUP_STUB_PORT), timeout=0.5):
+                    up = True
+                    break
+            except OSError:
+                time.sleep(0.2)
+        if not up:
+            raise RuntimeError("local OWUI stub for group tests never came up")
+        yield f"http://127.0.0.1:{GROUP_STUB_PORT}"
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=10)
+
+
+def _cfg(base_url: str) -> Config:
+    """Just enough Config for RoleMapper; every other field is unused here."""
+    return Config(
+        orch_api_key="unused",
+        master_secret="unused",
+        owui_base_url=base_url,
+        owui_admin_token=GROUP_STUB_TOKEN,
+        role_cache_ttl=60,
+        role_cache_grace=30,
+        owui_api_timeout=5.0,
+        runner_image="unused:dev",
+        runners_network="unused-net",
+        runner_nano_cpus=500_000_000,
+        runner_memory=320 * 1024**2,
+        runner_pids=256,
+        max_containers=3,
+        idle_timeout=60.0,
+        admin_nano_cpus=500_000_000,
+        admin_memory=384 * 1024**2,
+        admin_disk_soft=5 * 1024**3,
+        disk_soft=5 * 1024**3,
+    )
+
+
+def _resolve(cfg: Config, uid: str) -> Policy:
+    async def _run() -> Policy:
+        mapper = RoleMapper(cfg)
+        try:
+            return await mapper.resolve(uid)
+        finally:
+            await mapper.aclose()
+    return asyncio.run(_run())
+
+
+def test_group_names_resolve_for_a_grouped_user(group_stub):
+    policy = _resolve(_cfg(group_stub), "u-grouped-1")
+    assert policy.groups == ("devs",)
+    assert policy.group_ids == ("g-devs",), \
+        "ids should remain available for diagnostics alongside names"
+
+
+def test_an_ungrouped_user_resolves_to_an_empty_set(group_stub):
+    policy = _resolve(_cfg(group_stub), "u-nogroups-1")
+    assert policy.groups == ()
+    assert policy.group_ids == ()
+
+
+def test_a_user_in_several_groups_gets_every_name(group_stub):
+    policy = _resolve(_cfg(group_stub), "u-multigroup-1")
+    assert policy.groups == ("devs", "qa")
+    assert policy.group_ids == ("g-devs", "g-qa")
+
+
+def test_malformed_group_entries_are_skipped_not_raised(group_stub):
+    """A dict missing `id`, a dict missing `name`, and a non-dict entry are
+    all mixed in with two well-formed groups; only the well-formed ones
+    should survive, and nothing should raise."""
+    policy = _resolve(_cfg(group_stub), "u-messygroups-1")
+    assert policy.groups == ("devs", "qa")
+    assert policy.group_ids == ("g-devs", "g-qa")
+
+
+def test_cached_resolution_carries_groups_too(group_stub):
+    """The TTL-hit branch of resolve() (a fresh cache entry, second call
+    within role_cache_ttl) must return the same groups as the fetch that
+    populated the cache — not just the same role."""
+    cfg = _cfg(group_stub)
+
+    async def _run():
+        mapper = RoleMapper(cfg)
+        try:
+            first = await mapper.resolve("u-multigroup-cache")
+            second = await mapper.resolve("u-multigroup-cache")  # cache hit
+            return first, second
+        finally:
+            await mapper.aclose()
+
+    first, second = asyncio.run(_run())
+    assert first.groups == second.groups == ("devs", "qa")
+    assert first.group_ids == second.group_ids == ("g-devs", "g-qa")
+
+
+def test_a_pending_account_is_still_denied_even_with_group_membership(group_stub):
+    """Fail-closed is unchanged by this prefactor: groups are attached to the
+    Policy object, but AccessDenied is raised before a Policy is ever built
+    for a role _gate() refuses (spec.md: "group membership never grants or
+    removes access")."""
+    with pytest.raises(AccessDenied):
+        _resolve(_cfg(group_stub), "p-withgroups-1")
+
+
+def test_an_unrecognised_role_is_still_denied_even_with_group_membership(group_stub):
+    with pytest.raises(AccessDenied):
+        _resolve(_cfg(group_stub), "x-withgroups-1")
+
+
+def test_an_unknown_user_is_still_denied(group_stub):
+    with pytest.raises(AccessDenied):
+        _resolve(_cfg(group_stub), "nobody-this-stub-has-never-heard-of")
