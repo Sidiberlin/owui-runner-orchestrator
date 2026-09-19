@@ -149,3 +149,28 @@ implicates the ticket's own changed files still blocks, full stop.
   Unrelated flakiness observed and judged unrelated: see Suite section above
   (full list of files/tests, all pre-existing and untouched by this diff,
   under a host load average north of 37 and near-exhausted swap).
+
+**Coordinator decision on ticket 02:** ratified. The one touched-file failure
+(`test_roles.py::test_recovery_is_automatic`) was an `httpx.ReadTimeout`
+waiting on the stub OWUI container after a restart+sleep, under load average
+37/60/62 with 4.7/5.7 GiB swap in use, and it reproduced clean (12/12, no
+timeouts) in an isolated `-k roles` re-run at lighter load — that's an
+environmental symptom, not a logic regression in the group-names change.
+Ticket 02 accepted.
+
+**Protocol refinement for tickets 03–10** (to stop spending a full
+coordinator round-trip re-litigating the same host-contention judgment call
+every ticket): a failure touching a file the ticket's diff changed is still
+not waved off by assumption, but if the implementing agent (a) confirms via
+`git diff --stat` which files it actually changed, (b) re-runs the specific
+failing test(s) in isolation (`-k <name>`) and they pass clean, and (c) the
+failure's own signature is a timeout/connection error correlated with
+`uptime`/`free -h` showing genuine host contention (load average and swap
+materially elevated versus the suite's normal ~5-8 min-run baseline) rather
+than an assertion mismatch — the agent may treat it as contention, proceed
+to commit, and log the full reasoning (command, error, isolated-rerun
+result, host stats) in that ticket's NIGHT-REPORT entry for the record,
+without waiting for a separate coordinator sign-off message. An assertion
+failure (expected != actual, not a timeout/connection error) on a touched
+file always blocks regardless of host load — that distinction doesn't
+change.
