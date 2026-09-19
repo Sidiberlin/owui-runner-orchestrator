@@ -41,3 +41,11 @@ _Avoid_: ownership tag
 
 **Verify**:
 Open WebUI's probe of a terminal-server configuration; the orchestrator answers it, proving the route end to end without touching runners.
+
+**Driving agent**:
+The LLM conversation in Open WebUI that decides which terminal tools to call; it lives outside the runner and reaches it only through the orchestrator proxy.
+_Avoid_: harness, opencode (the CLI is a tool inside the toolbox, not the driver)
+
+**Open Terminal (server)**:
+The HTTP terminal API inside each runner — executes command strings, serves workspace files — that the driving agent's tool calls land on. No intelligence of its own.
+_Avoid_: agent, harness, sandbox daemon
