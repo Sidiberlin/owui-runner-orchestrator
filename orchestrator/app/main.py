@@ -84,6 +84,17 @@ async def lifespan(app: FastAPI):
         cfg.max_containers, cfg.runner_memory // 1024**2, cfg.idle_timeout,
         ",".join(cfg.proxy_deny_prefixes), cfg.runner_image,
     )
+    # Resolved profile table (ADR-0012, ticket 03): one line per profile so
+    # an operator reads what the deployment will actually do instead of
+    # re-deriving it from POLICY_* env vars in their head.
+    for name in sorted(cfg.profiles):
+        p = cfg.profiles[name]
+        log.info(
+            "policy profile %-12s cpus=%.2f memory=%dMiB idle=%.0fs "
+            "exec=%.0fs image=%s egress=%s",
+            name, p.nano_cpus / 1_000_000_000, p.memory // 1024**2,
+            p.idle_timeout, p.exec_timeout, p.image, p.egress,
+        )
     try:
         yield
     finally:

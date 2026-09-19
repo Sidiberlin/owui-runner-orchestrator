@@ -112,6 +112,142 @@ def parse_duration(text: str) -> float:
     return float(m.group(1)) * _DUR[m.group(2).lower()]
 
 
+# --- Policy profiles (ADR-0012, ticket 03) ----------------------------------
+# The vocabulary only: POLICY_<NAME>_<FIELD> env vars parse into named
+# Profile bundles. Nothing here selects a profile for a request (that is
+# GROUP_MAP, ticket 04) or applies one to a container (ticket 05+); this
+# module only builds the resolved table and lets main.py log it at boot.
+
+DEFAULT_PROFILE_NAME = "default"
+# Matches orientation.py's current hardcoded SANDBOX_EGRESS value verbatim,
+# so the default profile's egress field is "today", not a new default.
+DEFAULT_EGRESS_STANCE = "BLOCKED"
+
+_PROFILE_FIELDS = ("CPUS", "MEMORY", "IDLE_TIMEOUT", "EXEC_TIMEOUT", "IMAGE", "EGRESS")
+
+
+@dataclass(frozen=True)
+class Profile:
+    """A named bundle of runner settings (ADR-0012). Every field inherits the
+    matching global default when its POLICY_<NAME>_<FIELD> var is unset, so
+    the "default" profile (DEFAULT_PROFILE_NAME) is exactly today's global
+    values -- nothing re-specified. Profiles tune; they never gate: this
+    object carries no admission decision, that stays the role check's and
+    the allowlist's alone.
+    """
+    name: str
+    nano_cpus: int
+    memory: int
+    idle_timeout: float
+    exec_timeout: float
+    image: str
+    egress: str
+
+
+def _profile_fields_by_name(environ: dict) -> dict[str, dict[str, str]]:
+    """Group POLICY_<NAME>_<FIELD> env vars by canonical profile name.
+
+    Case rule: the <NAME> segment is matched case-insensitively and stored
+    lower-cased, because GROUP_MAP (ticket 04) is free-form operator text
+    while POLICY_* is a shell env var and conventionally upper-case -- a
+    single lower-casing point here means a GROUP_MAP entry and a POLICY_*
+    declaration never have to agree on casing convention to refer to the
+    same profile. The FIELD suffix itself is matched upper-case only, same
+    as every other env var this module reads.
+
+    A POLICY_* var whose suffix does not match one of the six known fields
+    is a startup error, not a silent ignore: this namespace is reserved for
+    profile fields, so an unrecognised suffix is far more likely to be a
+    typo (POLICY_HEAVY_CPU) than an intentional unrelated var, and a typo
+    here would otherwise silently fall back to the global default -- exactly
+    the failure mode this module exists to rule out.
+    """
+    by_name: dict[str, dict[str, str]] = {}
+    for key, value in environ.items():
+        if not key.startswith("POLICY_"):
+            continue
+        rest = key[len("POLICY_"):]
+        field = next((f for f in _PROFILE_FIELDS if rest.endswith("_" + f)), None)
+        if field is None:
+            raise RuntimeError(
+                f"{key} is not a recognised policy field; expected "
+                f"POLICY_<NAME>_<FIELD> where FIELD is one of "
+                f"{', '.join(_PROFILE_FIELDS)}"
+            )
+        name = rest[: -(len(field) + 1)]
+        if not name:
+            raise RuntimeError(f"{key} is missing a profile name")
+        canonical = name.lower()
+        if canonical == DEFAULT_PROFILE_NAME:
+            raise RuntimeError(
+                f"{key}: profile name {DEFAULT_PROFILE_NAME!r} is reserved "
+                "for the implicit default profile (today's global values "
+                "verbatim); declaring POLICY_DEFAULT_* would let it drift "
+                "from today, which defeats the point of a default -- pick "
+                "another name"
+            )
+        by_name.setdefault(canonical, {})[field] = value.strip()
+    return by_name
+
+
+def build_profiles(
+    *,
+    default_nano_cpus: int,
+    default_memory: int,
+    default_idle_timeout: float,
+    default_exec_timeout: float,
+    default_image: str,
+    default_egress: str,
+    environ: dict | None = None,
+) -> dict[str, "Profile"]:
+    """The resolved profile table: always contains DEFAULT_PROFILE_NAME
+    (assembled from the passed-in global values, never from POLICY_DEFAULT_*
+    -- see `_profile_fields_by_name`), plus one Profile per distinct name
+    found in POLICY_<NAME>_<FIELD> vars, each field inheriting the matching
+    global default when unset.
+    """
+    environ = os.environ if environ is None else environ
+    profiles: dict[str, Profile] = {
+        DEFAULT_PROFILE_NAME: Profile(
+            DEFAULT_PROFILE_NAME, default_nano_cpus, default_memory,
+            default_idle_timeout, default_exec_timeout, default_image,
+            default_egress,
+        )
+    }
+    for name, fields in _profile_fields_by_name(environ).items():
+        try:
+            nano_cpus = (
+                int(float(fields["CPUS"]) * 1_000_000_000)
+                if "CPUS" in fields else default_nano_cpus
+            )
+            memory = (
+                parse_size(fields["MEMORY"])
+                if "MEMORY" in fields else default_memory
+            )
+            idle_timeout = (
+                parse_duration(fields["IDLE_TIMEOUT"])
+                if "IDLE_TIMEOUT" in fields else default_idle_timeout
+            )
+            exec_timeout = (
+                parse_duration(fields["EXEC_TIMEOUT"])
+                if "EXEC_TIMEOUT" in fields else default_exec_timeout
+            )
+        except ValueError as exc:
+            raise RuntimeError(f"policy profile {name!r}: {exc}") from exc
+
+        image = fields.get("IMAGE", default_image)
+        if "IMAGE" in fields and not image:
+            raise RuntimeError(f"policy profile {name!r}: IMAGE is set but empty")
+        egress = fields.get("EGRESS", default_egress)
+        if "EGRESS" in fields and not egress:
+            raise RuntimeError(f"policy profile {name!r}: EGRESS is set but empty")
+
+        profiles[name] = Profile(
+            name, nano_cpus, memory, idle_timeout, exec_timeout, image, egress,
+        )
+    return profiles
+
+
 @dataclass(frozen=True)
 class Config:
     # --- auth -----------------------------------------------------------
@@ -174,8 +310,32 @@ class Config:
     memory_budget: int = 0
     runner_version: str = "1"
 
+    # --- policy profiles (ADR-0012, the v2 group-tuning vocabulary) --------
+    # Always contains at least DEFAULT_PROFILE_NAME. Empty only for a Config
+    # built by hand (tests) rather than via from_env().
+    profiles: dict[str, Profile] = field(default_factory=dict)
+
     @classmethod
     def from_env(cls) -> "Config":
+        # Hoisted (rather than inlined below, like every other field) because
+        # the policy-profile default table is assembled from these same
+        # parsed values -- "default" must be these globals verbatim, not a
+        # second, possibly-drifted read of the same env vars.
+        runner_image = os.getenv("RUNNER_IMAGE", "owui-agent-runner:dev")
+        runner_nano_cpus = int(_float("RUNNER_CPUS", 1.5) * 1_000_000_000)
+        runner_memory = parse_size(os.getenv("RUNNER_MEMORY", "1g"))
+        idle_timeout = parse_duration(os.getenv("IDLE_TIMEOUT", "30m"))
+        ot_execute_timeout = _int("OPEN_TERMINAL_EXECUTE_TIMEOUT", 120)
+
+        profiles = build_profiles(
+            default_nano_cpus=runner_nano_cpus,
+            default_memory=runner_memory,
+            default_idle_timeout=idle_timeout,
+            default_exec_timeout=float(ot_execute_timeout),
+            default_image=runner_image,
+            default_egress=DEFAULT_EGRESS_STANCE,
+        )
+
         return cls(
             orch_api_key=_req("ORCH_API_KEY"),
             master_secret=_req("ORCH_MASTER_SECRET"),
@@ -184,13 +344,13 @@ class Config:
             role_cache_ttl=_int("ROLE_CACHE_TTL", 60),
             role_cache_grace=_int("ROLE_CACHE_GRACE", 600),
             owui_api_timeout=_float("OWUI_API_TIMEOUT", 5.0),
-            runner_image=os.getenv("RUNNER_IMAGE", "owui-agent-runner:dev"),
+            runner_image=runner_image,
             runners_network=os.getenv("RUNNERS_NETWORK", "owui-runners-internal"),
-            runner_nano_cpus=int(_float("RUNNER_CPUS", 1.5) * 1_000_000_000),
-            runner_memory=parse_size(os.getenv("RUNNER_MEMORY", "1g")),
+            runner_nano_cpus=runner_nano_cpus,
+            runner_memory=runner_memory,
             runner_pids=_int("RUNNER_PIDS", 256),
             max_containers=_int("MAX_CONTAINERS", 6),
-            idle_timeout=parse_duration(os.getenv("IDLE_TIMEOUT", "30m")),
+            idle_timeout=idle_timeout,
             runner_security_opt=_csv(
                 "RUNNER_SECURITY_OPT", "no-new-privileges,apparmor=unconfined"
             ),
@@ -207,7 +367,7 @@ class Config:
             retention_sweep_interval=_int("RETENTION_SWEEP_INTERVAL", 3600),
             idle_sweep_interval=_float("IDLE_SWEEP_INTERVAL", 30.0),
             ot_max_sessions=_int("OPEN_TERMINAL_MAX_SESSIONS", 8),
-            ot_execute_timeout=_int("OPEN_TERMINAL_EXECUTE_TIMEOUT", 120),
+            ot_execute_timeout=ot_execute_timeout,
             ot_session_cwd_ttl=_int("OPEN_TERMINAL_SESSION_CWD_TTL", 604800),
             **_package_seam(),
             # Admin limits default to the user limits, so "higher limits for
@@ -234,4 +394,5 @@ class Config:
             memory_budget=parse_size(os.getenv("RUNNER_MEMORY_BUDGET", "0"))
             if os.getenv("RUNNER_MEMORY_BUDGET", "").strip() else 0,
             runner_version=os.getenv("RUNNER_VERSION", "1"),
+            profiles=profiles,
         )
