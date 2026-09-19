@@ -39,6 +39,17 @@ _Avoid_: firewalled, restricted
 The container label marking which orchestrator instance owns a runner, so a second stack can never adopt or reap foreign runners.
 _Avoid_: ownership tag
 
+**Policy profile**:
+A named bundle of runner settings (cpus, memory, idle timeout, exec timeout, image, egress stance) defined via `POLICY_<NAME>_*` env vars. Groups select a profile through `GROUP_MAP`; users with no matching group get the default profile, which equals today's global defaults. Profiles tune; the role/allowlist gate still decides access.
+_Avoid_: "role" (roles gate, profiles tune), "tier", "plan".
+
+**GROUP_MAP**:
+The ordered `groupname:profile` list mapping OWUI group names to policy profiles; left-to-right priority, first match wins, unknown group warns and falls back to the default profile. Matching is by group name (readability over rename-stability).
+_Avoid_: per-user config, group UUIDs in config.
+
+**Groups (OWUI)**:
+Admin-managed user collections in Open WebUI. The users-list payload carries each user's `group_ids` already — group resolution needs no extra API round-trip. Membership never grants access by itself; it only selects a policy profile.
+
 **Verify**:
 Open WebUI's probe of a terminal-server configuration; the orchestrator answers it, proving the route end to end without touching runners.
 
