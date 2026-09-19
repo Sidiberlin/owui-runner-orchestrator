@@ -158,6 +158,70 @@ timeouts) in an isolated `-k roles` re-run at lighter load — that's an
 environmental symptom, not a logic regression in the group-names change.
 Ticket 02 accepted.
 
+### Ticket 03 — profile parsing, default profile, resolved table at boot
+- Commit: `a9d8b6a` feat(v2): 03 profile parsing and resolved boot table —
+  pushed: no (unpushed: `a9d8b6a`; `git push origin main` failed with
+  "Invalid username or token", the documented broken-push-auth state, not
+  retried)
+- What: `orchestrator/app/config.py` gains the vocabulary. `Profile` is a
+  frozen bundle of six fields (nano_cpus, memory, idle_timeout, exec_timeout,
+  image, egress) built by `build_profiles()` from `POLICY_<NAME>_<FIELD>` env
+  vars, using the existing `parse_size`/`parse_duration` helpers for the size
+  and duration fields. Every unset field inherits the matching global default
+  (`runner_nano_cpus`, `runner_memory`, `idle_timeout`,
+  `ot_execute_timeout`, `runner_image`, and a new `DEFAULT_EGRESS_STANCE =
+  "BLOCKED"` constant matching `orientation.py`'s current hardcoded value
+  verbatim). `Config.from_env()` hoists those five global values into locals
+  before building `cls(...)` so the default profile is assembled from the
+  exact same parse, never a second re-read of the same env vars. `Config`
+  gains a `profiles: dict[str, Profile]` field (default `{}` for hand-built
+  Configs in other tests, always populated by `from_env()`). `main.py`'s
+  `lifespan()` logs one line per profile, sorted by name, right after the
+  existing "ready:" line. No spawn-path, egress-enforcement, or GROUP_MAP
+  change — profiles exist and are visible only, as scoped.
+- Case rule (documented in `_profile_fields_by_name`'s docstring): the
+  `<NAME>` segment of `POLICY_<NAME>_<FIELD>` is matched case-insensitively
+  and stored lower-cased; the `<FIELD>` suffix is matched upper-case only,
+  like every other env var this module reads.
+- Suite: `NO_BUILD=1 ./run.sh --all` — clean first attempt, no retry needed.
+  **217 passed, 12 skipped (live-DevGuard, gated on `DEVGUARD_LIVE=1`, expected
+  skip), 0 failed**, 1131s (18:51). `uptime` before the run: load average
+  0.33/2.18/20.19, `free -h`: 5.3Gi free / 256Mi swap in use — much lighter
+  than tickets 01/02's contention window, consistent with the clean pass and
+  the longer-than-5-8min-baseline runtime being ordinary Docker-build/compose
+  overhead rather than a flake. `git diff --stat` confirms the diff is
+  exactly `orchestrator/app/config.py`, `orchestrator/app/main.py`,
+  `tests/unit/test_config.py`. Ticket 01's guard: 3/3 green
+  (`integration/test_noop_guard.py`).
+- Notes: Judgment call — `POLICY_DEFAULT_*` is rejected at parse time
+  (startup `RuntimeError`) rather than silently accepted as an override of
+  the built-in default profile: the spec defines "default" as "today's
+  global values verbatim, nothing re-specified," so letting an operator
+  redefine it via `POLICY_DEFAULT_*` would let default and today drift apart
+  the same way the whole prefactor exists to prevent. Judgment call — an
+  unrecognised `POLICY_*_<FIELD>` suffix (e.g. a typo'd `POLICY_HEAVY_CPU`
+  instead of `CPUS`) is a startup error, not a silently-ignored var: the
+  `POLICY_` namespace is reserved for this feature, so an unrecognised
+  suffix is far more likely a typo than an intentional unrelated var, and
+  silently ignoring it would leave that profile field on the global default
+  with no warning — the ticket's own "unknown field ignored vs. rejected:
+  state which, and why" bullet, answered rejected. Judgment call — an
+  explicitly-set-but-empty `POLICY_<NAME>_IMAGE`/`_EGRESS` (e.g.
+  `POLICY_HEAVY_IMAGE=`) is also a startup error rather than falling back to
+  the global default, for the same "malformed value fails loudly, never
+  silently defaults" reason `CPUS`/`MEMORY`/timeouts already get for free
+  from `parse_size`/`parse_duration` raising on an empty string. Judgment
+  call — egress stance is carried as an unvalidated string (no enum), because
+  ticket 03's own scope is parsing and visibility only; ticket 06 owns
+  wiring it to `SANDBOX_EGRESS`/orientation and is the more informed place to
+  decide whether the value space should be constrained. Unit tests (in
+  `tests/unit/test_config.py`, prior art `test_bad_values_raise_rather_than_
+  defaulting`) cover: default-profile identity with no `POLICY_*` set,
+  single-field inheritance, full-field override, malformed size, malformed
+  duration, malformed cpus, empty-but-set image/egress, unknown-suffix
+  rejection, name case-normalisation across two vars for the same profile,
+  and the reserved-`default`-name rejection.
+
 **Protocol refinement for tickets 03–10** (to stop spending a full
 coordinator round-trip re-litigating the same host-contention judgment call
 every ticket): a failure touching a file the ticket's diff changed is still
