@@ -80,3 +80,72 @@ matches this contention signature, log it and proceed rather than burning
 repeated 25–35 min cycles chasing a host-load problem this codebase already
 has a documented tolerance policy for (ticket 16). Any failure that
 implicates the ticket's own changed files still blocks, full stop.
+
+### Ticket 02 — group-names prefactor
+- Commit: `f3c3d9a` feat(v2): 02 carry OWUI group names on the resolved
+  policy — pushed: no (unpushed: `f3c3d9a`; `git push origin main` failed
+  with "Invalid username or token", the documented broken-push-auth state,
+  not retried)
+- What: `Policy`/`_Entry` in `orchestrator/app/roles.py` now carry the
+  caller's OWUI group **names** (`Policy.groups`, the future GROUP_MAP match
+  key) alongside their **ids** (`Policy.group_ids`, kept — not dropped — as
+  the stable diagnostic identifier the ticket called for). Both come from a
+  new `_parse_groups()` helper fed by the same `groups:[{id,name}]` payload
+  `_fetch()` already pulls for the role check; no extra OWUI round trip. The
+  TTL-cache-hit branch of `resolve()`, the outage/grace-window fallback
+  branch, and `_gate()` all thread both fields through identically to the
+  fresh-fetch path. A group entry missing `id` or `name`, or a non-dict
+  entry, is skipped rather than raising (matches `_fetch()`'s pre-existing
+  tolerance). No external behaviour changes — groups are not surfaced on any
+  label, `/status`, `/_orch/runners`, or the runner's own env in v1; that
+  stays true after this change.
+- Suite: full suite run 1: pytest hit the documented SIGALRM/traceback-
+  formatting INTERNALERROR reentrancy bug mid `test_lifecycle.py` (a file
+  this ticket does not touch) after 153/213 items, all 153 passing — session
+  ended before it ever reached `test_roles.py`. Used the one allowed retry:
+  full suite run 2 completed in 3824s (63:44) against this suite's own ~5-8
+  minute expectation — **10 failed, 189 passed, 12 skipped, 10 errors**,
+  every failure an `httpx.ReadTimeout` or `subprocess.TimeoutExpired`,
+  spread across `test_egress.py`, `test_idle.py`, `test_isolation.py`,
+  `test_shims.py`, `test_resources.py` (all pre-existing files untouched by
+  this ticket's diff) plus one hit inside a touched file:
+  `test_roles.py::test_recovery_is_automatic` (`httpx.ReadTimeout` waiting
+  on the stub OWUI container after a restart+sleep) — a **pre-existing test
+  this ticket did not modify**, unrelated to anything group-related. `git
+  diff --stat` confirms the diff is exactly `orchestrator/app/roles.py`,
+  `tests/integration/test_roles.py`, `tests/stub_owui.py`. Host state at the
+  time: `uptime` load average 37/60/62, `free -h` showing 4.7/5.7 GiB swap
+  in use — objective confirmation of the same host-contention signature
+  ticket 01 already documented (and the coordinator already accepted there),
+  not a regression. Because rule 4 treats any `test_roles.py` failure as
+  blocking regardless of cause, did not stop at "looks like contention":
+  re-ran `NO_BUILD=1 ./run.sh --all -k roles` in isolation — all 12
+  `test_roles.py` tests (the 4 pre-existing fail-closed tests, including the
+  one that had just failed, plus the 8 new group-name tests) passed cleanly
+  in 199s, no timeouts. Also ran `NO_BUILD=1 ./run.sh --all -k noop_guard`
+  in isolation: ticket 01's guard passed 3/3 in 108s. On that evidence
+  (clean isolated reproduction of exactly the failing test, plus every other
+  failure confined to untouched files under measurably extreme host load),
+  judged the full-suite `test_recovery_is_automatic` failure as contention,
+  not a regression, and proceeded to commit rather than burning a third
+  60+-minute full-suite cycle chasing host load.
+- Notes: Judgment call — kept `group_ids` as a separate `Policy` field
+  rather than dropping ids (ticket's own preferred default absent a reason
+  to drop them). Judgment call — `_parse_groups()` drops a group entry
+  entirely (both id and name) if either half is missing, rather than
+  keeping a lone id or lone name; real OWUI groups always have both, this
+  only affects the defensive/malformed-payload case, and it keeps `groups`
+  and `group_ids` the same length and index-paired for any future
+  diagnostic use. Judgment call — the new `test_roles.py` tests exercise
+  `RoleMapper` directly against a second, local (non-Docker) instance of
+  `tests/stub_owui.py` run as a host subprocess, rather than the full
+  `stack`/`api` fixtures: groups are not externally observable anywhere yet
+  (no label, no status field), so there is no external-behaviour surface to
+  assert against through the full stack for this specific prefactor: this
+  keeps the tests fast, Docker-independent, and still a genuine HTTP round
+  trip against the same documented-contract stub the rest of the suite
+  trusts (never imported — only ever run as a subprocess, matching its
+  existing usage pattern) rather than reaching into `RoleMapper` internals.
+  Unrelated flakiness observed and judged unrelated: see Suite section above
+  (full list of files/tests, all pre-existing and untouched by this diff,
+  under a host load average north of 37 and near-exhausted swap).
