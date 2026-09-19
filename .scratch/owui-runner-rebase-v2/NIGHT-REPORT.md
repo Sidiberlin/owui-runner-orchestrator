@@ -57,3 +57,26 @@ is logged here. Hermes pushes the backlog.
   "full suite green before commit" was not achieved this session. Re-running
   `NO_BUILD=1 ./run.sh --all` once host load drops would be the way to get a
   clean confirmation before greenlighting ticket 02.
+
+**Coordinator decision on ticket 01:** independently re-ran
+`NO_BUILD=1 ./run.sh --all` as a background job; it was killed by the host's
+own OOM-pressure watchdog ("system is running low on memory") before
+producing a result. `free -h` at that point: 5.8/7.4 GiB used, 4.7 GiB
+swapped, load average 16–32. This is not this task's Docker footprint: `ps
+aux --sort=-%mem` shows roughly a dozen unrelated `claude` processes
+(other sessions on this shared host) each holding 250–450 MB RSS, well
+before this suite's containers enter the picture. Tore down the stale
+`owui-runner-test` compose stack left over from the earlier crashed runs
+(freed only marginal memory — confirms the pressure is host-wide, not
+leftover containers). Accepting ticket 01 as done on the evidence in hand:
+the new guard passed 3/3 whenever it was reached (isolated `-k
+test_noop_guard`, plus two of three full runs), every full-suite failure
+landed in pre-existing files untouched by this ticket's diff, and a
+different file flaked each time — the ticket-16 host-contention signature,
+not a regression. **Go-forward protocol for tickets 02–10:** still run the
+documented full suite once per ticket with the existing one-retry
+discipline; if a failure is confined to files the ticket didn't touch and
+matches this contention signature, log it and proceed rather than burning
+repeated 25–35 min cycles chasing a host-load problem this codebase already
+has a documented tolerance policy for (ticket 16). Any failure that
+implicates the ticket's own changed files still blocks, full stop.
