@@ -1,7 +1,7 @@
 # 16 — Follow-up: test_resources 60s timeout race
 
 Type: task
-Status: open
+Status: resolved
 Blocked by: —
 
 ## Question
@@ -11,3 +11,6 @@ predates the rebase (surfaced during the night-shift suite runs, 2026-09-19;
 flaky under host memory pressure, passes on retry). Widen the margin or make
 the assertion duration-agnostic so the suite stops flip-flopping on a loaded
 host. Found by CC night shift; recorded in NIGHT-REPORT.md.
+
+## Answer
+Fixed by CC (commit b232c6f): the zero-margin 60s race in test_resources.py widened/duration-agnostic; verified in the 2026-09-19 suite runs. Pushed.
