@@ -41,6 +41,7 @@ operator's `.env`. It never touches a production stack on the same host.
 | `integration/test_roles.py` | A8 — fail closed, never open |
 | `integration/test_resources.py` | brief test (b) in the cgroup and by effect |
 | `integration/test_quota.py` | N4 accounting; N14 cache survives restart |
+| `integration/test_noop_guard.py` | ADR-0012 — empty `GROUP_MAP`/no `POLICY_*` is byte-for-byte v1: exact env, resources, image, security posture, network and idle timeout, for user and admin alike |
 
 ## Stub OWUI
 
