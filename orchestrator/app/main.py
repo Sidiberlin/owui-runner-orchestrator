@@ -137,6 +137,32 @@ def _mgr() -> RunnerManager:
     return mgr  # type: ignore[return-value]
 
 
+def _mapper() -> RoleMapper:
+    mapper = state.get("mapper")
+    if mapper is None:
+        raise HTTPException(503, "orchestrator still starting")
+    return mapper  # type: ignore[return-value]
+
+
+def _policy_profiles_payload(cfg: Config) -> dict:
+    """v2 (ADR-0012, ticket 08): the resolved profile table with effective
+    values, same fields the boot log prints (main.py's lifespan) -- an
+    operator confirms a mapping took effect here instead of exec-ing into
+    anything. With no POLICY_*/GROUP_MAP configured this is just the one
+    "default" entry, equal to the global knobs verbatim (ticket 03)."""
+    return {
+        name: {
+            "cpus": p.nano_cpus / 1_000_000_000,
+            "memory_mb": p.memory // 1024**2,
+            "idle_timeout_s": p.idle_timeout,
+            "exec_timeout_s": p.exec_timeout,
+            "image": p.image,
+            "egress": p.egress,
+        }
+        for name, p in sorted(cfg.profiles.items())
+    }
+
+
 async def require_orch_key(
     authorization: Annotated[str | None, Header()] = None,
 ) -> None:
@@ -155,7 +181,7 @@ async def healthz() -> Response:
 
 @app.get("/_orch/status", dependencies=[Depends(require_orch_key)])
 async def status() -> dict:
-    mgr, cfg = _mgr(), _cfg()
+    mgr, cfg, mapper = _mgr(), _cfg(), _mapper()
     avail = available_memory_bytes()
     return {
         "runners_live": len(mgr.all()),
@@ -177,6 +203,12 @@ async def status() -> dict:
         "idle_timeout_s": cfg.idle_timeout,
         "deny_prefixes": list(cfg.proxy_deny_prefixes),
         "runner_image": cfg.runner_image,
+        # v2 (ADR-0012, ticket 08): "did my mapping take effect?", answered
+        # without exec-ing into anything. Checked live on every call (not
+        # cached from boot) so a group rename shows up here in the next
+        # request, not only in the boot log.
+        "policy_profiles": _policy_profiles_payload(cfg),
+        "unknown_mapped_groups": await mapper.unknown_mapped_groups(),
     }
 
 
@@ -191,6 +223,10 @@ async def list_runners() -> list[dict]:
             "idle_s": round(now - r.last_seen, 1),
             "workspace_mb": mgr.quota.last_known(r.uid) // 1024**2,
             "replaced_reason": r.replaced_reason,
+            # v2 (ADR-0012, ticket 08): the profile this runner was created
+            # under -- restart-adopted runners included, restored from the
+            # durable label (ticket 05).
+            "profile": r.profile,
         }
         for r in mgr.all()
     ]

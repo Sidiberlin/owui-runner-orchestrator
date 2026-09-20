@@ -328,3 +328,49 @@ def test_resolve_profile_never_raises():
     check's and the allowlist's job alone."""
     profiles = _profiles()
     resolve_profile(("nonsense", "groups", "here"), (), profiles)
+
+
+# --- status-surface profile table (ADR-0012, ticket 08) ---------------------
+# app.main is FastAPI-decorated; imported lazily inside each test, matching
+# the existing convention (see test_discovery_and_hardening.py's own
+# `from app.main import _advertisement`), to avoid paying app-construction
+# cost for every unrelated unit test in this file.
+
+def test_policy_profiles_payload_shape_and_units():
+    from app.main import _policy_profiles_payload
+
+    profiles = _profiles(
+        POLICY_HEAVY_CPUS="2", POLICY_HEAVY_MEMORY="512m",
+        POLICY_HEAVY_IDLE_TIMEOUT="10m", POLICY_HEAVY_EXEC_TIMEOUT="90s",
+        POLICY_HEAVY_IMAGE="owui-agent-runner:heavy", POLICY_HEAVY_EGRESS="RELAXED",
+    )
+    payload = _policy_profiles_payload(_FakeCfg(profiles))
+    assert payload["heavy"] == {
+        "cpus": 2.0, "memory_mb": 512, "idle_timeout_s": 600.0,
+        "exec_timeout_s": 90.0, "image": "owui-agent-runner:heavy",
+        "egress": "RELAXED",
+    }
+
+
+def test_policy_profiles_payload_with_no_mapping_is_just_the_default():
+    """With no POLICY_* configured (build_profiles' own no-op guarantee,
+    ticket 03), the status payload's added field still reports -- just the
+    one "default" entry -- rather than being empty or absent."""
+    from app.main import _policy_profiles_payload
+
+    profiles = _profiles()
+    payload = _policy_profiles_payload(_FakeCfg(profiles))
+    assert set(payload) == {DEFAULT_PROFILE_NAME}
+    assert payload[DEFAULT_PROFILE_NAME] == {
+        "cpus": 1.5, "memory_mb": 768, "idle_timeout_s": 1800.0,
+        "exec_timeout_s": 120.0, "image": "owui-agent-runner:dev",
+        "egress": DEFAULT_EGRESS_STANCE,
+    }
+
+
+class _FakeCfg:
+    """`_policy_profiles_payload` only reads `.profiles` -- a real `Config`
+    is unnecessary ceremony for a test that is entirely about that one
+    field's shape."""
+    def __init__(self, profiles):
+        self.profiles = profiles

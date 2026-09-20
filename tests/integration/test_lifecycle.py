@@ -3,8 +3,8 @@ import concurrent.futures as cf
 
 import pytest
 
-from conftest import (container_exists, inspect, purge_runners, runner_name_for,
-                      sh)
+from conftest import (container_exists, env_value, inspect, purge_runners,
+                      runner_name_for, sh)
 
 pytestmark = pytest.mark.integration
 
@@ -237,3 +237,53 @@ def test_a_container_lost_out_of_band_frees_its_budget_slot(
     rows = api.get("/_orch/runners", headers=stack.orch_headers()).json()
     assert uids[0] not in [r["uid"] for r in rows], \
         "the orchestrator still counts a container that no longer exists"
+
+
+# ---------------------------------------------------------------------------
+# Ticket 08 (v2.0 group policy profiles, docs/adr/0012): profile
+# observability on the status surface -- "did my mapping take effect?"
+# without exec-ing into anything. Reuses the same "heavy"/"ops" test profile
+# and GROUP_MAP as tickets 05-07 (see this file's own ticket-05 section for
+# why it cannot perturb any other test); env.test also maps a deliberately
+# unknown "ghost-team:heavy" entry for the unknown-mapped-groups field.
+# Response-body assertions only, per the ticket's own testing requirement.
+# ---------------------------------------------------------------------------
+def test_status_reports_the_resolved_profile_table(api, stack):
+    status = api.get("/_orch/status", headers=stack.orch_headers()).json()
+    profiles = status["policy_profiles"]
+    image = env_value("RUNNER_IMAGE")
+    assert profiles["default"] == {
+        "cpus": 0.5, "memory_mb": 320, "idle_timeout_s": 60.0,
+        "exec_timeout_s": 120.0, "image": image, "egress": "BLOCKED",
+    }
+    assert profiles["heavy"] == {
+        "cpus": 1.0, "memory_mb": 200, "idle_timeout_s": 15.0,
+        "exec_timeout_s": 45.0, "image": image, "egress": "RELAXED",
+    }
+
+
+def test_status_reports_unknown_mapped_groups(api, stack):
+    status = api.get("/_orch/status", headers=stack.orch_headers()).json()
+    assert status["unknown_mapped_groups"] == ["ghost-team"]
+
+
+def test_runner_list_reports_the_profile_name(api, stack, cleanup_runners):
+    heavy_uid = "u-opsgroup-status"
+    cleanup_runners.append(heavy_uid)
+    assert api.get("/system", headers=stack.user_headers(heavy_uid)).status_code == 200
+    rows = api.get("/_orch/runners", headers=stack.orch_headers()).json()
+    row = next(r for r in rows if r["uid"] == heavy_uid)
+    assert row["profile"] == "heavy"
+
+
+def test_runner_list_reports_the_profile_for_an_adopted_runner(
+        api, stack, uid, cleanup_runners):
+    """Restart-adopted runners included, per the ticket's own wording."""
+    cleanup_runners.append(uid)
+    assert api.get("/system", headers=stack.user_headers(uid)).status_code == 200
+
+    stack.restart_orchestrator()
+
+    rows = api.get("/_orch/runners", headers=stack.orch_headers()).json()
+    row = next(r for r in rows if r["uid"] == uid)
+    assert row["profile"] == "default"

@@ -12,9 +12,11 @@ Mirrors the real contract from open-webui/backend/open_webui/routers/users.py:
     of open-webui's admin group-list route exists in this repo, unlike the
     per-user endpoint above -- this is app.roles.RoleMapper's own documented
     assumption about the response shape, mirrored here so the same stub
-    exercises it. Returns exactly the two sample groups every other route on
-    this stub already hands out (_DEVS, _QA), so "known to OWUI" here means
-    "one of those two."
+    exercises it. Returns the three sample groups every other route on this
+    stub already hands out (_DEVS, _QA, _OPS), so "known to OWUI" here means
+    "one of those three" -- ticket 08's unknown-mapped-group status field
+    needs a group name deliberately absent from BOTH this list and every
+    uid's own membership below to have anything to report.
 
 Roles are resolved by prefix so every test can use a unique uid and never
 collide with another test's runner:
@@ -103,7 +105,7 @@ class H(BaseHTTPRequestHandler):
         if self.headers.get("Authorization") != f"Bearer {TOKEN}":
             return self._send(401, {"detail": "Not authenticated"})
         if self.path.rstrip("/") == "/api/v1/groups":
-            return self._send(200, [_DEVS, _QA])
+            return self._send(200, [_DEVS, _QA, _OPS])
         if not self.path.startswith("/api/v1/users/"):
             return self._send(404, {"detail": "no route"})
         uid = self.path.rsplit("/", 1)[-1]
