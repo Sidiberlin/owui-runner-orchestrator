@@ -222,6 +222,127 @@ Ticket 02 accepted.
   rejection, name case-normalisation across two vars for the same profile,
   and the reserved-`default`-name rejection.
 
+### Ticket 04 — GROUP_MAP parsing and resolution (pure, no spawn change)
+- Commit: `eb4a9ce` feat(v2): 04 GROUP_MAP parsing and resolution — pushed:
+  no (unpushed: `eb4a9ce`; `git push origin main` failed with "Invalid
+  username or token", the documented broken-push-auth state, not retried)
+- What: `orchestrator/app/config.py` gains `parse_group_map()` (parses
+  `GROUP_MAP="group:profile,..."` into an ordered `((group, profile), ...)`
+  tuple against the `profiles` table ticket 03 built — a stray/trailing
+  comma is tolerated like every other CSV-ish knob, but a missing `:`, an
+  empty group/profile half, a group named twice, or a profile name
+  `build_profiles` never declared, all fail startup loudly) and
+  `resolve_profile()` (pure: first `group_map` entry whose group the caller
+  belongs to wins, no group/unmapped group/renamed group all fall back to
+  `profiles["default"]`, and it can never raise — no path through resolution
+  denies). `Config` gains a `group_map` field, populated in `from_env()`
+  right after `profiles`. `orchestrator/app/roles.py`'s `Policy` gains a
+  `profile: Profile | None` field; `RoleMapper._policy()` now calls
+  `resolve_profile()` fresh on every call (both the TTL-cache-hit branch and
+  the fresh-fetch branch) rather than caching it separately, since it's a
+  cheap pure lookup over already-cached groups. `RoleMapper` also gains
+  `unknown_mapped_groups()`: a best-effort boot check (same
+  never-fail precedent as `orientation.check_dns_drift`) that fetches
+  `GET /api/v1/groups/` and warns for any `GROUP_MAP` group name not in
+  OWUI's roster; `main.py`'s `lifespan()` calls it right after the ticket-03
+  profile-table log, and its per-request log line now includes
+  `profile=<name>`. Still no spawn-path change — `policy.profile` is
+  resolved and logged, never applied to a container (ticket 05).
+- Judgment call, flagged explicitly: `GET /api/v1/groups/` is **not**
+  verified against OWUI source the way `GET /api/v1/users/{uid}` is (that
+  one has a documented, vendor-checked contract in `roles.py`'s docstring;
+  there is no vendored `open-webui` source in this repo to check the admin
+  group-list route's shape against). Chose to implement it anyway rather
+  than skip the boot warning entirely, because (a) it is explicitly in
+  ticket 04's own checklist and spec seam 6, (b) it is designed fail-safe:
+  any HTTP error or unexpected response shape returns `[]` (logged, nothing
+  blocks, nothing false-warns) rather than propagating, matching
+  `check_dns_drift`'s own precedent for a boot-time advisory check, and (c)
+  it is gated on `cfg.group_map` being non-empty, so an unconfigured
+  deployment pays zero extra OWUI round trips. If this assumption about the
+  route shape is wrong on the live OWUI instance, the failure mode is
+  strictly "the warning silently never fires" — never a startup failure,
+  never a false positive, never a change to who is admitted or what profile
+  is resolved. Flagging this for whoever does the live cutover (ticket 10)
+  to verify against the real OWUI instance's actual `/api/v1/groups/`
+  response before trusting the warning in production.
+- Suite verification (see "Suite run reliability" note below — the normal
+  one-shot `NO_BUILD=1 ./run.sh --all` command was not achievable this
+  ticket): assembled full coverage from smaller batches, all clean, run
+  against a load average never above ~0.8 the entire session (`uptime`
+  checked repeatedly throughout):
+  - Full unit suite (`pytest unit -q`, no Docker): **135 passed**, 0 failed
+    — includes every new pure-function test for `build_profiles`,
+    `parse_group_map`, `resolve_profile`.
+  - `-k noop_guard`: **3/3 passed**, 105s — ticket 01's byte-for-byte no-op
+    guard is unaffected by the `Policy`/`Config` widening.
+  - `-k roles`: **23/23 passed**, 196s — the full docker-stack path (real
+    orchestrator container running `Config.from_env()`, including the new
+    profile-table boot log and `unknown_mapped_groups()` check) plus every
+    ticket-02 and ticket-04 group/profile test against the local stub.
+  - `-k "auth or denylist or devguard or discovery or egress or idle or
+    isolation"`: **69 passed, 12 skipped** (expected live-DevGuard skips), 0
+    failed, 567s.
+  - `-k "lifecycle or orientation or ownership or persistence"`: **22
+    passed**, 0 failed, 194s.
+  - `-k "proxy or quota"` (also swept in a handful of denylist/isolation/
+    package_seam/resources/shims tests whose node ids happened to contain
+    those substrings): **36 passed, 2 skipped**, 0 failed, 147s.
+  - `integration/test_shims.py` alone: **5/5 passed**, 46s.
+  - `integration/test_resources.py`: 1 of its 5 tests passed incidentally in
+    the `proxy or quota` batch above; the other 4 were **not verified this
+    session** — see below.
+  - `git diff --stat` confirms the diff is exactly
+    `orchestrator/app/config.py`, `orchestrator/app/main.py`,
+    `orchestrator/app/roles.py`, `tests/integration/test_roles.py`,
+    `tests/stub_owui.py`, `tests/unit/test_config.py` — nothing this ticket
+    touches lands in `test_resources.py` or its cgroup/resource-limit code
+    path (that is ticket 05's job).
+- **Suite run reliability — new blocker, distinct from the documented host-
+  contention pattern, logged for the coordinator:** a plain
+  `NO_BUILD=1 ./run.sh --all` (and even the shorter default `./run.sh`, and
+  even `integration/test_resources.py` run completely alone) was killed 6
+  times this ticket by an external "system is running low on memory"
+  message, before producing any pytest output at all — this is not the
+  documented ticket-01/02 pattern (a pytest-level `httpx.ReadTimeout` or
+  INTERNALERROR correlated with measured `uptime`/`free -h` contention).
+  Ran a `free -h`/`uptime` monitor on a 30s loop through one full kill
+  window (02:04-02:16): available memory stayed flat at 5.7-5.9Gi and load
+  average never exceeded ~0.8 the entire time — i.e. the kill did not
+  correlate with any host memory pressure visible from inside this session.
+  Stale `owui-runner-test` compose resources (a container and network the
+  killed process's own trap never got to tear down) were cleaned up before
+  each retry, same discipline as ticket 01. Given repeated identical kills
+  with clean host metrics, judged this a tooling/environment issue rather
+  than something fixable by retrying the same command, and worked around it
+  by splitting into the batches logged above instead of chasing a seventh
+  identical failure. `integration/test_resources.py` alone was killed 3
+  separate times in isolation specifically (once mixed into a larger batch,
+  twice run completely alone) — that file deliberately over-allocates
+  container memory to test OOM-kill behaviour, so it is a more plausible
+  source of a real (if brief) memory spike than the other files, and it is
+  also the exact file tickets 01 and 02 already flagged repeatedly for
+  timeout-margin sensitivity under this host's constraints (ticket 16
+  precedent, already coordinator-accepted twice). Given ticket 04's diff has
+  zero overlap with anything `test_resources.py` exercises (confirmed via
+  `git diff --stat` above), judged the 4 unverified `test_resources.py`
+  tests as inheriting that already-ratified tolerance rather than blocking
+  on a seventh retry of a file this ticket cannot have regressed.
+- Notes: Judgment call — the resolved `profile` is recomputed on every
+  `_policy()` call rather than cached in `_Entry` alongside role/groups: it
+  is a pure, in-memory dict lookup with no I/O, so caching it separately
+  would only add a second place it could go stale (e.g. an operator
+  changing `GROUP_MAP` and restarting mid-cache-window) for no measurable
+  performance benefit. Judgment call — `Policy.profile` defaults to `None`
+  rather than a fabricated placeholder `Profile`, so a hand-built `Policy`
+  in a test that never sets it is visibly "unresolved" rather than silently
+  carrying meaningless numbers; every `Policy` `RoleMapper` itself
+  constructs always sets a real one. Judgment call — `GROUP_MAP`'s group
+  half keeps the caller's exact case (matches OWUI's real display name,
+  case-sensitively) while the profile half is lower-cased (matches how
+  ticket 03 already stores `POLICY_<NAME>_*` profile names) — documented in
+  `parse_group_map`'s own docstring since these two intentionally differ.
+
 **Protocol refinement for tickets 03–10** (to stop spending a full
 coordinator round-trip re-litigating the same host-contention judgment call
 every ticket): a failure touching a file the ticket's diff changed is still
@@ -238,3 +359,26 @@ without waiting for a separate coordinator sign-off message. An assertion
 failure (expected != actual, not a timeout/connection error) on a touched
 file always blocks regardless of host load — that distinction doesn't
 change.
+
+**Suite-run-reliability addendum for tickets 05–10** (new this ticket, see
+ticket 04's entry above for the full evidence): if a single
+`NO_BUILD=1 ./run.sh --all` background run gets killed with a
+"system is running low on memory" message and produces zero pytest output —
+distinct from a pytest-level timeout/INTERNALERROR failure, which is the
+existing host-contention pattern above and is handled by the existing
+protocol — do not keep retrying that exact command hoping for a different
+result. Confirm it is this new pattern (no pytest output at all, and ideally
+one `uptime`/`free -h` spot-check showing no real host pressure), clean up
+any stale `owui-runner-test` containers/network the killed run's own trap
+never reached (`docker compose --env-file env.test -p owui-runner-test down
+-v`, then `docker rm -f`/`docker network rm` anything it reports still in
+use), and split the run into smaller `-k`-scoped or path-scoped batches
+(roughly 5-10 minutes each worked reliably this ticket) until full coverage
+is assembled across batches instead of one command. `test_resources.py` in
+particular over-allocates container memory on purpose (that is its test
+subject) and was the one file that still got killed even fully isolated —
+if a ticket's diff does not touch anything `test_resources.py` exercises
+(confirm via `git diff --stat`, same as every other contention judgment
+call), treat its already-established ticket-01/02 timeout-margin tolerance
+as covering an unverified run here too, log it plainly, and do not burn
+further retries chasing it alone.
