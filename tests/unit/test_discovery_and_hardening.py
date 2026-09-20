@@ -64,15 +64,21 @@ def _advert(deny):
     return _advertisement(cfg)["features"]
 
 
-def test_terminal_advertised_false_while_pty_is_denied():
-    """Copying Open Terminal's own `terminal: true` would promise OWUI a PTY
-    pane that 403s on first use."""
-    assert _advert(("/proxy", "/ports", "/api/terminals"))["terminal"] is False
+def test_terminal_always_advertised_true_regardless_of_pty_denylist():
+    """v2.0 QA finding (2026-09-20): OWUI gates the model's exec/run_command
+    tool call on `features.terminal`, not only the interactive PTY pane the
+    original (now-reverted) `not is_denied(...)` derivation assumed. Verified
+    live: a connection advertising `terminal:false` made every exec attempt
+    fail client-side ("Terminal server '<id>' is unavailable") before any
+    request reached this orchestrator, silently breaking all of ADR-0012's
+    exec-based checks. `terminal` is therefore always advertised True; the PTY
+    itself stays blocked independently by the Q5 proxy denylist on
+    /api/terminals in `proxy_to_runner()`, whatever this flag says."""
+    assert _advert(("/proxy", "/ports", "/api/terminals"))["terminal"] is True
+    assert _advert(("/proxy", "/ports"))["terminal"] is True
 
 
 def test_advertisement_follows_the_denylist():
-    f = _advert(("/proxy", "/ports"))          # PTY no longer denied
-    assert f["terminal"] is True
     assert _advert(("/notebooks",))["notebooks"] is False
     assert _advert(())["system"] is True
 

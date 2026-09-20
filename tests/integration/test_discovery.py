@@ -36,14 +36,15 @@ def test_policies_probe_is_never_2xx(api, stack):
     assert not (200 <= r.status_code < 300), r.status_code
 
 
-def test_pty_is_not_advertised_while_it_is_denied(api, stack):
+def test_terminal_is_advertised_true_and_pty_is_still_denied(api, stack):
+    """v2.0 QA finding (2026-09-20): OWUI gates the model's exec/run_command
+    tool call on `features.terminal`, not only the PTY pane. Advertising
+    `terminal:false` (the v1 behaviour this replaces) silently broke exec for
+    every user. `terminal` is now always True; the actual PTY-pane guarantee
+    -- /api/terminals still 403s -- is covered independently by
+    test_denylist.py, unaffected by this advertisement."""
     feats = api.get("/api/config", headers=stack.orch_headers()).json()["features"]
-    deny = api.get("/_orch/status", headers=stack.orch_headers()).json()["deny_prefixes"]
-    if "/api/terminals" in deny:
-        assert feats["terminal"] is False, (
-            "advertising a PTY that the denylist blocks makes OWUI render a "
-            "pane that 403s on first use"
-        )
+    assert feats["terminal"] is True
 
 
 def test_files_serve_is_sandboxed(api, stack, uid, cleanup_runners):

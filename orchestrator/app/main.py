@@ -259,17 +259,30 @@ async def teardown(uid: str) -> dict:
 def _advertisement(cfg: Config) -> dict:
     """What this orchestrator honestly supports, derived from the denylist.
 
-    Open Terminal itself answers `{"features":{"terminal":true,"notebooks":true,
-    "system":true}}`. We must NOT copy that verbatim: `terminal` refers to the
-    interactive PTY widget backed by /api/terminals, which the Q5 denylist
-    blocks in v1. Advertising it would make OWUI render a terminal pane that
-    403s on first use. Deriving the flag from the denylist keeps the
-    advertisement true automatically if the denylist ever changes.
+    v2.0 QA finding (2026-09-20, group-policy-profiles E2E pass): `features.
+    terminal` is NOT only the PTY-pane-render signal the original comment
+    assumed. Live-verified against OWUI: a connection advertising
+    `terminal:false` also makes the model's exec/`run_command` tool call fail
+    client-side with "Terminal server '<id>' is unavailable" -- BEFORE any
+    HTTP request reaches this orchestrator (confirmed via orchestrator access
+    logs showing zero /execute traffic for the failing calls, while an
+    otherwise-identical connection advertising `terminal:true` succeeded and
+    was logged normally). That silently broke every exec-based capability
+    (including all of ADR-0012's SANDBOX_EGRESS profile checks) behind a flag
+    that was meant only to hide a PTY pane.
+
+    Advertising `terminal:true` does NOT reopen the PTY: /api/terminals is
+    still hard-blocked by the Q5 proxy denylist in `proxy_to_runner()`
+    independently of this advertisement, on every request path except the
+    unauthenticated discovery probe handled above. Worst case if OWUI ever
+    renders a PTY-pane affordance from this flag, opening it still 403s with
+    the Q5 explanation -- exactly the outcome the original comment wanted to
+    avoid, just reached via the denylist instead of the advertisement.
     """
     denied = cfg.proxy_deny_prefixes
     return {
         "features": {
-            "terminal": not proxy.is_denied("/api/terminals", denied),
+            "terminal": True,
             "notebooks": not proxy.is_denied("/notebooks", denied),
             "system": not proxy.is_denied("/system", denied),
         }
