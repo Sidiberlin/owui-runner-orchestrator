@@ -881,3 +881,11 @@ ticket required a coordinator judgment call beyond the two protocols
 already ratified before this session began (host-contention tolerance,
 ticket 01/02; the suite-run-reliability addendum this session added at
 ticket 04).
+
+**Post-chain push retry (after ticket 10 landed):** re-ran `git push origin
+main` once more, on the user's explicit request, in case credentials had
+been fixed since the last attempt. Failed identically — same "Invalid
+username or token" error as every attempt across the whole session. Not
+retried further. All 20 commits (`a9d8b6a` through `0684f0d`) remain
+unpushed; pushing this backlog is still Hermes'/the stakeholder's, per the
+standing push note above.
