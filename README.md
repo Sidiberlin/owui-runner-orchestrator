@@ -4,7 +4,8 @@ Per-user ephemeral coding-agent containers driven by Open WebUI's native
 Open Terminal integration. Self-hosted replacement for the Enterprise-licensed
 "Terminals" orchestrator.
 
-Decision records: [`docs/adr/`](docs/adr/) · glossary: [`CONTEXT.md`](CONTEXT.md).
+Documentation: [`docs/`](docs/) (tutorial, how-tos, reference, explanation) ·
+decision records: [`docs/adr/`](docs/adr/) · glossary: [`CONTEXT.md`](CONTEXT.md).
 
 ## Status
 
@@ -112,7 +113,7 @@ Four fixes, none of which the stub suite could have surfaced:
 | Fix | Why |
 |---|---|
 | `GET /api/config` discovery probe | OWUI's `verify` calls the server with the key but **no `X-User-Id`**. Both probe paths hit the `X-User-Id` requirement and 400'd, so OWUI reported *"Failed to connect to the terminal server"*. |
-| Advertise `terminal: false` | Open Terminal answers `{"features":{"terminal":true,…}}`. `terminal` means the PTY widget backed by `/api/terminals`, which the Q5 denylist blocks — copying it verbatim would render a pane that 403s. The advertisement is derived from the denylist so it stays true. |
+| Advertise `terminal: true` (**superseded** — see below) | Originally advertised `false`, derived from the Q5 denylist, on the reasoning that `terminal` only controls whether OWUI renders the PTY pane `/api/terminals` blocks anyway. Live QA later found `terminal:false` **also silently disables OWUI's chat-model exec tool for the connection** — the actual v2.0 fix and incident record are in [`docs/explanation/sandbox-and-spawn-time-binding.md`](docs/explanation/sandbox-and-spawn-time-binding.md#the-terminaltrue-incident-one-flag-two-meanings). |
 | Answer only `/api/config`, never `/api/v1/policies` | OWUI probes `/api/v1/policies` first; a 2xx there makes it classify the server as an **enterprise orchestrator** and drive it with the policy/lifecycle API this v1 does not implement. Presenting as one plain terminal is the design. |
 | `Content-Security-Policy: sandbox` on `/files/serve` | See Accepted Risks / closed risks below. |
 
