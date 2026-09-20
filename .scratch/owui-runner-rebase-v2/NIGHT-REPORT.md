@@ -598,3 +598,67 @@ based test.
   source of truth" / "channels asserted consistent per profile" language
   reads as wanting the prose to track real per-stance behaviour, not just
   the env var's name.
+
+### Ticket 07 — per-profile idle timeout honoured by the sweeper
+- Commit: `921e0c3` feat(v2): 07 per-profile idle timeout honoured by the
+  sweeper — pushed: no (unpushed: `921e0c3`; `git push origin main` failed
+  with "Invalid username or token", the documented broken-push-auth state,
+  not retried)
+- What: `orchestrator/app/labels.py` gains an `IDLE_TIMEOUT` durable label
+  (a plain number string, seconds) alongside `PROFILE`/`ROLE`. Deliberately
+  NOT re-derived from `PROFILE` + live config at reconciliation time, unlike
+  how it might look tempting to simplify: an operator editing
+  `POLICY_<NAME>_IDLE_TIMEOUT` and restarting the orchestrator must not
+  retroactively change the timeout an already-running runner is reclaimed
+  under — the same "created under, not a live recompute" guarantee memory
+  already gets (read back from the container's own Docker `HostConfig`,
+  ticket 05) and profile's NAME already gets from its own label. `Runner`
+  gains an `idle_timeout: float` field, set by all three construction sites
+  (`_spawn`, `_try_adopt`, `reconcile`) via a new `_label_idle_timeout()`
+  helper (tolerant of a missing/malformed label — a pre-v2-adopted runner or
+  a corrupted value both fall back to the current global default, same
+  tolerance `PROFILE`/`ROLE` already have for a missing label).
+  `orchestrator/app/workers.py`'s `idle_worker` now compares
+  `idle_for < runner.idle_timeout` instead of the single global
+  `mgr.cfg.idle_timeout` — the only change to the sweeper itself; busy-is-
+  not-idle and every other rule is untouched.
+- Suite: full batched re-run, every batch clean: unit 139/139 (unaffected —
+  no unit tests touch this file); targeted (`-k "idle or noop_guard"`,
+  `--all` since `test_idle.py` is `@pytest.mark.slow`) 10/10 in 459.91s;
+  batch A (auth/denylist/devguard/discovery/egress/isolation/orientation)
+  78 passed/12 skipped; batch B (lifecycle/ownership/persistence/proxy/
+  quota) 54 passed/2 skipped; `test_resources.py` + `test_shims.py` 10/10.
+  `git diff --stat`: exactly `orchestrator/app/labels.py`,
+  `orchestrator/app/runners.py`, `orchestrator/app/workers.py`,
+  `tests/env.test`, `tests/integration/test_idle.py`.
+- Tests added (`tests/integration/test_idle.py`, prior art per the ticket):
+  extended the "heavy"/"ops" test profile (ticket 05) with
+  `POLICY_HEAVY_IDLE_TIMEOUT=15s` — far shorter than the global `60s`, so a
+  test can prove per-runner reclamation within one settle window instead of
+  waiting out the full global timeout twice.
+  - `test_a_shorter_profile_timeout_reclaims_while_the_default_survives`:
+    exactly the ticket's own demo — a heavy-profile and a default-profile
+    runner spawned together; at `HEAVY_SETTLE` (30s, well short of the
+    default's 60s) the heavy one is gone and the default one is still up.
+  - `test_a_mapped_profiles_idle_timeout_survives_restart_and_adoption`:
+    mirrors ticket 05's profile-label restart test, but proves the NUMERIC
+    timeout specifically — if reconciliation had silently fallen back to
+    the 60s global, the runner would still be alive at `HEAVY_SETTLE` and
+    the assertion would fail.
+  - Every pre-existing test in the file (all on the plain `uid` fixture,
+    which resolves to the default/global profile) is the "no mapping
+    configured, global timeout exactly as today" regression coverage —
+    unmodified, still green.
+- Notes: Judgment call — `_label_idle_timeout()` treats a missing OR
+  unparseable label identically (fall back to the current global), rather
+  than distinguishing "pre-v2 runner" from "corrupted label" — both are
+  operator-invisible edge cases where refusing to reconcile the runner at
+  all would be a worse outcome than a same-tolerance fallback, and this
+  matches the precedent `PROFILE`'s own `.get(L.PROFILE, DEFAULT_PROFILE_
+  NAME)` already sets (no distinction there either). Judgment call — chose
+  to make the test profile's idle timeout SHORTER than the global (15s vs
+  60s) rather than longer, purely so the test settles faster; the ticket's
+  own "shorter reclaimed, longer survives" framing works identically either
+  direction, and this way the default-profile comparison point (30s) stays
+  comfortably under the default's own 60s without needing a second, even
+  longer wait.
