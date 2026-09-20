@@ -529,3 +529,72 @@ based test.
   resolved exec_timeout, so a profile declaring a sub-second value lands on
   the nearest whole second rather than always truncating down; the default
   case (`float(120)`) is unaffected either way.
+
+### Ticket 06 — per-profile egress stance through spawn env and orientation
+- Commit: `1e25d34` feat(v2): 06 per-profile egress stance through spawn env
+  and orientation — pushed: no (unpushed: `1e25d34`; `git push origin main`
+  failed with "Invalid username or token", the documented broken-push-auth
+  state, not retried)
+- What: `orchestrator/app/orientation.py`'s `sandbox_env()` and
+  `render_agents_md()` both gain an explicit `egress: str` parameter instead
+  of the hardcoded `"BLOCKED"` literal v1 had; `SANDBOX_MODE` stays the
+  constant `"air-gapped"` (the topology is single and unchanged for every
+  profile in v2.0 — per-profile networks are explicitly out of scope), only
+  `SANDBOX_EGRESS` varies. The AGENTS.md template's one behavioural claim
+  ("fail fast") is now genuinely conditional (`_egress_note()`): `BLOCKED`
+  keeps v1's exact wording (instant refusal, no network touched); anything
+  else describes `runner/shims/sandbox-shim.sh`'s actual real behaviour (a
+  real attempt for a couple of seconds, still always failing) — the shim
+  itself is untouched, this only keeps the PROSE honest about what it does.
+  `orchestrator/app/runners.py`'s `get_or_spawn()` now also resolves
+  `egress = profile.egress if profile else DEFAULT_EGRESS_STANCE` (a no-op
+  for the default case by construction, ticket 03) and threads it through
+  `_spawn()` → `_runner_env()` (the data channel) and the `seed_agents_md()`
+  call (the prose channel) — both from the same resolved value, so they
+  cannot independently drift, exactly as the existing single-renderer
+  design already guaranteed for the services list.
+- Suite: full batched re-run, every batch clean, no retries needed
+  (`uptime` stayed light throughout — see host-state note in ticket 05's
+  entry, still true here): unit 139/139 (+4 new); batch A
+  (auth/denylist/devguard/discovery/idle/isolation) 63 passed/12 skipped;
+  targeted batch (orientation/egress/orientation_renderer/noop_guard)
+  18/18; batch B1 (lifecycle/ownership/persistence) 18/18; batch B2
+  (proxy/quota) 36 passed/2 skipped; `test_resources.py` + `test_shims.py`
+  10/10. `git diff --stat`: exactly `orchestrator/app/orientation.py`,
+  `orchestrator/app/runners.py`, `tests/env.test`,
+  `tests/integration/test_egress.py`, `tests/integration/test_orientation.py`,
+  `tests/unit/test_orientation_renderer.py`,
+  `tests/unit/test_readme_env_docs.py`.
+- Tests added: extended `env.test`'s existing "heavy"/"ops" test profile
+  (ticket 05) with `POLICY_HEAVY_EGRESS=RELAXED`, reusing the same
+  no-perturbation guarantee (only a uid containing "opsgroup" ever carries
+  the "ops" group).
+  - `tests/unit/test_orientation_renderer.py`: the renderer functions
+    directly — stance threads into `SANDBOX_EGRESS` verbatim while
+    `SANDBOX_MODE` stays constant; `BLOCKED`'s AGENTS.md text is byte-
+    identical to v1; a non-`BLOCKED` stance's text never claims "instantly"
+    but still says "exit 126"; the two channels agree for both stances.
+  - `tests/integration/test_orientation.py`: a "heavy"-profile runner's real
+    env AND its real AGENTS.md (read back through `/files/read`, not the
+    renderer directly) both reflect "RELAXED"; the default-profile runner's
+    AGENTS.md is still byte-identical to v1's wording.
+  - `tests/integration/test_egress.py`:
+    `test_a_relaxed_stance_still_has_zero_real_egress` — the load-bearing
+    proof for "not a hole in the topology": a RELAXED-stance runner still
+    cannot reach `1.1.1.1`, verified via `curl_in`'s `/usr/bin/curl` direct
+    call (bypasses the shim entirely, same bypass this file's other tests
+    already use to prove topology rather than shim behaviour).
+- Notes: Judgment call — chose "RELAXED" as the test's non-default stance
+  value (free string, no enum exists or is needed: the shim only branches
+  on `== "BLOCKED"` vs everything else, runner/shims/sandbox-shim.sh,
+  unmodified). Judgment call — `SANDBOX_MODE` is NOT parameterised by
+  profile, only `SANDBOX_EGRESS` is: the spec scopes "egress stance" to one
+  of a profile's six fields, and `SANDBOX_MODE` describes the topology
+  (single, constant, out-of-scope-to-vary), not the stance. Judgment call —
+  reworded the AGENTS.md sentence to be conditionally accurate rather than
+  leaving "fail fast" unconditionally true-ish for both branches: a
+  non-BLOCKED stance's ~2s real attempt is not "fast" by the same standard
+  the BLOCKED branch's instant refusal is, and the ticket's own "single
+  source of truth" / "channels asserted consistent per profile" language
+  reads as wanting the prose to track real per-stance behaviour, not just
+  the env var's name.
