@@ -108,12 +108,15 @@ each persona's own session):
 
 **Follow-ups filed for v2.1:** `OWUI_ADMIN_TOKEN` rename (misnomer — holds
 the non-expiring key); config preflight warning when a profile's CPUs exceed
-host cores (clean DockerError today); `python3 -m pip` in orientation text;
-legacy "LXC 101 Terminal" connection review (unsandboxed open-terminal, now
-admin-only — consider removal or explicit grants).
+host cores (clean DockerError today); `python3 -m pip` in orientation text.
+Stakeholder decisions (2026-09-20): signup stays enabled (intended); repo
+stays private for now; **legacy "LXC 101 Terminal" connection KEPT as an
+admin-only escape hatch** (empty grants = private = admins only by default;
+the orchestrator remains the only non-admin road to a shell).
 
-**Verdict after remediation: READY for the trusted-circle deployment**, with
-the legacy-connection review as the one open security question.
+**Verdict after remediation: READY for the trusted-circle deployment**; all
+open decisions taken (legacy connection kept admin-only, signup intended,
+repo stays private).
 
 ## Assumptions and judgment calls (logged per task instructions, no blocking questions asked)
 
