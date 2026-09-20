@@ -78,6 +78,43 @@ No numeric baseline existed for this feature area before this session (first Exh
 - **After this session:** finding #1 root-caused and fixed in source (pending deploy); finding #2 root-caused and documented (pending a stakeholder access-grant decision, correctly not forced by me). Underlying GROUP_MAP/profile resolution logic confirmed correct via 144/144 unit tests, `/_orch/status`, and OWUI's group-membership API. qa2-admin's full exec path (env, cpuinfo, curl-blocked behavior, file browsing) verified working end-to-end via the real OWUI→orchestrator route.
 - **Still 0% observable for qa2-heavy/qa2-plain** until both findings are resolved in the live environment — this is the honest state and the reason for the NOT READY verdict.
 
+## Post-QA verification (Hermes, same day — blockers resolved)
+
+**Blocker #1 fix deployed** (0947ca4 built, shipped, recreated): `/api/config`
+now advertises `terminal: True` on live. Chat-exec path unblocked.
+
+**Blocker #2 resolved by stakeholder decision**: entitlement group
+`runner-users` created; the "Runner Orchestrator (.64)" connection's
+`config.access_grants` (the actual field this build reads — an
+`access_control` object is ignored by `has_connection_access`) grants
+`read` to that group, applied live via the configs API (no downtime).
+
+**Full e2e matrix through the real product path** (OWUI terminals proxy,
+each persona's own session):
+
+| Persona | Sees connection | Exec | SANDBOX_EGRESS | profile |
+|---|---|---|---|---|
+| qa2-admin | yes (admin bypass) | ✓ | BLOCKED | default |
+| qa2-heavy (qa-heavy) | yes | ✓ | **ALLOWED** | **heavy** |
+| qa2-plain (runner-users only) | yes | ✓ | BLOCKED | default |
+| qa2-nobody (no groups) | no | 403 | — | — |
+
+**Money test, full semantics** (role-cache TTL 60s, `ROLE_CACHE_TTL`):
+- Add qa2-plain to qa-heavy → teardown → fresh spawn: **ALLOWED** ✓
+- Remove qa2-plain → teardown → fresh spawn at +8s: still ALLOWED (cache
+  hit, by design) → fresh spawn at +65s: **BLOCKED** ✓
+- **Documented semantics: group changes take effect on the next runner
+  spawn, bounded by the 60s role-cache TTL.** Product behavior, not a bug.
+
+**Follow-ups filed for v2.1:** `OWUI_ADMIN_TOKEN` rename (misnomer — holds
+the non-expiring key); config preflight warning when a profile's CPUs exceed
+host cores (clean DockerError today); `python3 -m pip` in orientation text;
+legacy "LXC 101 Terminal" connection review (unsandboxed open-terminal, now
+admin-only — consider removal or explicit grants).
+
+**Verdict after remediation: READY for the trusted-circle deployment**, with
+the legacy-connection review as the one open security question.
+
 ## Assumptions and judgment calls (logged per task instructions, no blocking questions asked)
 
 - Skipped interactive gstack onboarding prompts (upgrade check, telemetry, proactive-suggestion prompts) per the task's explicit "don't wait for answers" instruction.
