@@ -5,7 +5,7 @@ already drifted from the implementation.
 import os
 
 from app import orientation
-from app.config import Config
+from app.config import DEFAULT_EGRESS_STANCE, Config
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -36,7 +36,8 @@ def test_static_sandbox_vars_match_the_renderer():
             owui_api_timeout=1.0, runner_image="x", runners_network="x",
             runner_nano_cpus=1, runner_memory=1, runner_pids=1,
             max_containers=1, idle_timeout=1.0,
-        )
+        ),
+        DEFAULT_EGRESS_STANCE,
     )
     assert f"SANDBOX_MODE={devguard_off['SANDBOX_MODE']}" in section
     assert f"SANDBOX_EGRESS={devguard_off['SANDBOX_EGRESS']}" in section

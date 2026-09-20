@@ -82,6 +82,46 @@ def test_agents_md_survives_teardown_and_recreate_without_being_clobbered(
     assert r.json()["content"] == custom, "the seed step clobbered the user's own AGENTS.md"
 
 
+# ---------------------------------------------------------------------------
+# Ticket 06 (v2.0 group policy profiles, docs/adr/0012): per-profile egress
+# stance. env.test maps GROUP_MAP=ops:heavy (POLICY_HEAVY_EGRESS=RELAXED) to
+# a group only a uid containing "opsgroup" ever carries -- see
+# tests/integration/test_lifecycle.py's own ticket-05 section for why this
+# cannot perturb any other test.
+# ---------------------------------------------------------------------------
+def test_a_mapped_profiles_stance_reaches_both_channels(
+        api, stack, cleanup_runners):
+    """The env side (data channel) and AGENTS.md (prose channel) must both
+    reflect the resolved "RELAXED" stance, not the default "BLOCKED" one."""
+    heavy_uid = "u-opsgroup-egress"
+    cleanup_runners.append(heavy_uid)
+    h = stack.user_headers(heavy_uid)
+    assert api.get("/system", headers=h).status_code == 200
+
+    env = _env_of(runner_name_for(heavy_uid))
+    assert env.get("SANDBOX_EGRESS") == "RELAXED"
+    assert env.get("SANDBOX_MODE") == "air-gapped", \
+        "topology description is constant across profiles in v2.0"
+
+    agents_md = api.get("/files/read", headers=h, params={"path": "AGENTS.md"}).text
+    assert "instantly" not in agents_md, \
+        "AGENTS.md must not claim an instant fail for a non-BLOCKED stance"
+    assert "exit 126" in agents_md, "must still say the call ultimately fails"
+
+
+def test_the_default_profiles_stance_is_unchanged_from_v1(
+        api, stack, uid, cleanup_runners):
+    """The other half of ticket 06's own checklist: the strict/default
+    stance must stay byte-identical to today's -- same assertion
+    test_sandbox_env_is_present_on_every_runner already makes for the env
+    side; this is the prose side of that same guarantee."""
+    cleanup_runners.append(uid)
+    h = stack.user_headers(uid)
+    assert api.get("/system", headers=h).status_code == 200
+    agents_md = api.get("/files/read", headers=h, params={"path": "AGENTS.md"}).text
+    assert "fail instantly (exit 126), no network touched." in agents_md
+
+
 def test_agents_md_is_reseeded_on_a_fresh_volume(api, stack, uid, cleanup_runners):
     cleanup_runners.append(uid)
     h = stack.user_headers(uid)

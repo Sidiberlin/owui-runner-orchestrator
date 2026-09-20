@@ -48,6 +48,27 @@ def test_dns_resolution_is_dead(stack, runner):
     assert "DEAD" in out
 
 
+# ---------------------------------------------------------------------------
+# Ticket 06 (v2.0 group policy profiles, docs/adr/0012): "a stance is an
+# explanation to the agent, not a hole in the topology" -- proven here by
+# effect, the same way every other zero-egress guarantee in this file is.
+# env.test maps GROUP_MAP=ops:heavy (POLICY_HEAVY_EGRESS=RELAXED) to a group
+# only a uid containing "opsgroup" ever carries (see test_lifecycle.py's own
+# ticket-05 section for why this cannot perturb any other test).
+# ---------------------------------------------------------------------------
+def test_a_relaxed_stance_still_has_zero_real_egress(api, stack, cleanup_runners):
+    """SANDBOX_EGRESS=RELAXED changes only whether the SHIM fast-refuses or
+    lets the real binary attempt first (runner/shims/sandbox-shim.sh,
+    unmodified by this ticket) -- the network topology enforces zero egress
+    either way. `curl_in` calls /usr/bin/curl directly, the same bypass
+    every other test in this file uses to prove topology rather than shim
+    behaviour."""
+    heavy_uid = "u-opsgroup-egress-topology"
+    cleanup_runners.append(heavy_uid)
+    assert api.get("/system", headers=stack.user_headers(heavy_uid)).status_code == 200
+    assert _unreachable(stack, heavy_uid, "https://1.1.1.1")
+
+
 def test_attached_to_exactly_one_internal_network(stack, runner):
     """A6: assert on container config, not just a probe from inside.
 

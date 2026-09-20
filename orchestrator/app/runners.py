@@ -44,7 +44,7 @@ from datetime import datetime, timezone
 import aiodocker
 
 from . import dockerapi, keys, labels as L, orientation, volumes
-from .config import Config, DEFAULT_PROFILE_NAME
+from .config import Config, DEFAULT_EGRESS_STANCE, DEFAULT_PROFILE_NAME
 from .quota import MonitorQuota, QuotaExceeded
 
 log = logging.getLogger(__name__)
@@ -358,6 +358,10 @@ class RunnerManager:
         exec_timeout = (
             profile.exec_timeout if profile else float(self.cfg.ot_execute_timeout)
         )
+        # v2 (ticket 06): the default profile's egress equals
+        # DEFAULT_EGRESS_STANCE by construction (ticket 03), so this is a
+        # no-op for a caller with no resolved profile too.
+        egress = profile.egress if profile else DEFAULT_EGRESS_STANCE
         profile_name = profile.name if profile else DEFAULT_PROFILE_NAME
         role = policy.role if policy else "user"
         lock = await self._lock_for(uid)
@@ -377,7 +381,7 @@ class RunnerManager:
             await self.prune_dead()
             self._admit(uid, mem)
             return await self._spawn(
-                uid, nano, mem, role, image, exec_timeout, profile_name,
+                uid, nano, mem, role, image, exec_timeout, profile_name, egress,
             )
 
     # --- internals ------------------------------------------------------------
@@ -436,7 +440,7 @@ class RunnerManager:
         log.info("adopted existing runner %s for %s", name, uid)
         return runner
 
-    def _runner_env(self, key: str, exec_timeout: float) -> list[str]:
+    def _runner_env(self, key: str, exec_timeout: float, egress: str) -> list[str]:
         env = {
             "OPEN_TERMINAL_API_KEY": key,
             "OPEN_TERMINAL_MULTI_USER": "false",
@@ -462,12 +466,13 @@ class RunnerManager:
         # N9: OPEN_TERMINAL_ALLOWED_DOMAINS is deliberately never set. Setting
         # it activates the entrypoint's iptables firewall, which needs
         # CAP_NET_ADMIN we do not grant. `internal: true` is the real control.
-        # Agent orientation (Workstream L, ticket 13): the data channel.
-        env.update(orientation.sandbox_env(self.cfg))
+        # Agent orientation (Workstream L, ticket 13; per-profile, ticket 06).
+        env.update(orientation.sandbox_env(self.cfg, egress))
         return [f"{k}={v}" for k, v in env.items()]
 
     async def _spawn(self, uid: str, nano_cpus: int, memory: int, role: str,
-                      image: str, exec_timeout: float, profile_name: str) -> Runner:
+                      image: str, exec_timeout: float, profile_name: str,
+                      egress: str) -> Runner:
         s_uid = safe_uid(uid)
         name = f"runner-{s_uid}"
         nonce = keys.mint_nonce()
@@ -485,7 +490,7 @@ class RunnerManager:
                 role=role, network=self.cfg.runners_network,
                 profile=profile_name,
             ),
-            "Env": self._runner_env(key, exec_timeout),
+            "Env": self._runner_env(key, exec_timeout, egress),
             "HostConfig": {
                 "NanoCpus": nano_cpus,
                 "Memory": memory,
@@ -534,7 +539,9 @@ class RunnerManager:
         # user's own edits) is left alone. Best effort; never blocks a spawn.
         await orientation.seed_agents_md(
             f"http://{name}:{self.cfg.runner_port}", key,
-            orientation.render_agents_md(orientation.sandbox_services(self.cfg)),
+            orientation.render_agents_md(
+                orientation.sandbox_services(self.cfg), egress,
+            ),
         )
 
         data = await container.show()

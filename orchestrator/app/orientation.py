@@ -13,6 +13,16 @@ Four independent channels, because any one alone loses to a stubborn model:
 `sandbox_services()` is the single source of truth for channels 1 and 2: the
 env renderer and the AGENTS.md renderer both consume its output, so the two
 can never list different services.
+
+v2 (ADR-0012, ticket 06): both renderers also take the resolved profile's
+egress stance as an explicit parameter, rather than the hardcoded "BLOCKED"
+literal this module used through v1. Deliberately a caller-supplied value,
+not something read back off `cfg` here -- the stance is per-request/per-
+profile (config.Profile.egress), never a single global, and threading it as
+a parameter is what keeps this module a pure function of its inputs rather
+than needing to know about profile resolution at all. Passing
+config.DEFAULT_EGRESS_STANCE reproduces the exact v1 behaviour every caller
+had before this ticket.
 """
 from __future__ import annotations
 
@@ -61,19 +71,27 @@ def render_services_env(services: list[SandboxService]) -> str:
     return ",".join(f"{s.hostport}={s.description}" for s in services)
 
 
-def sandbox_env(cfg: Config) -> dict[str, str]:
+def sandbox_env(cfg: Config, egress: str) -> dict[str, str]:
     """The data channel. Always present, even with an empty services list --
-    an agent checking `env | grep SANDBOX` should never find nothing."""
+    an agent checking `env | grep SANDBOX` should never find nothing.
+
+    SANDBOX_MODE stays the constant "air-gapped": that describes the
+    TOPOLOGY (internal: true, no capabilities), which is single and
+    unchanged for every profile in v2.0 (per-profile networks are out of
+    scope). SANDBOX_EGRESS is the one value a profile actually varies --
+    the shim's own fast-refuse-vs-real-attempt behaviour keys on it
+    (runner/shims/sandbox-shim.sh), unmodified by this ticket."""
     return {
         "SANDBOX_MODE": "air-gapped",
-        "SANDBOX_EGRESS": "BLOCKED",
+        "SANDBOX_EGRESS": egress,
         "SANDBOX_INTERNAL_SERVICES": render_services_env(sandbox_services(cfg)),
     }
 
 
 # English, factual, <=20 lines (ticket 04): models obey specifics, not
-# lectures. The services line is the one part that varies by deployment --
-# everything else is the same regardless of what is configured.
+# lectures. The services line is the one part that varies by deployment;
+# the egress-behaviour sentence is the other (ticket 06, ADR-0012) -- see
+# _egress_note() for the exact wording per stance.
 _AGENTS_MD_TEMPLATE = """\
 # This machine
 
@@ -90,7 +108,7 @@ Internal services (machine-readable in $SANDBOX_INTERNAL_SERVICES):
 {services}
 
 curl, wget and apt-get work ONLY for internal services. Pointed at the
-outside world they print an explanation and fail fast (exit 126).
+outside world they {egress_note}
 Never use them against external URLs; never run `apt-get update`/`install`.
 
 git works locally (init, commit, diff). Cloning from external hosts is
@@ -101,12 +119,28 @@ Check `env | grep SANDBOX` for the machine-readable facts about this machine.
 """
 
 
-def render_agents_md(services: list[SandboxService]) -> str:
+def _egress_note(egress: str) -> str:
+    """The one sentence fragment that must stay honest about
+    sandbox-shim.sh's actual per-stance timing (unmodified by this ticket):
+    SANDBOX_EGRESS=BLOCKED refuses instantly, no network touched; any other
+    value lets the real binary attempt for a couple of seconds first. Either
+    way the call still always fails (exit 126) -- the network topology
+    enforces that regardless of this env var (ticket 06: "a stance is an
+    explanation to the agent, not a hole in the topology")."""
+    if egress == "BLOCKED":
+        return "print an explanation and fail instantly (exit 126), no network touched."
+    return (
+        "attempt for a couple of seconds, then print an explanation and "
+        "fail (exit 126) -- there is no real route out either way."
+    )
+
+
+def render_agents_md(services: list[SandboxService], egress: str) -> str:
     body = (
         "\n".join(f"- {s.hostport} -- {s.description}" for s in services)
         if services else "- (none configured on this deployment)"
     )
-    return _AGENTS_MD_TEMPLATE.format(services=body)
+    return _AGENTS_MD_TEMPLATE.format(services=body, egress_note=_egress_note(egress))
 
 
 async def seed_agents_md(
