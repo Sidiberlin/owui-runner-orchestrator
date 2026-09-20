@@ -34,6 +34,11 @@ without perturbing the role-prefix convention above:
                     tolerance: missing id, missing name, non-dict)
     withgroups   -> devs                                (used to prove a
                     denied role stays denied even while it carries a group)
+    opsgroup     -> ops                                  (ticket 05: a group
+                    ONLY a uid containing this substring ever carries, so
+                    env.test's GROUP_MAP=ops:heavy mapping cannot perturb any
+                    other test's users -- they all keep resolving to "devs"
+                    or no group, neither of which GROUP_MAP maps)
 
 Anything else keeps the pre-ticket-02 default: plain `user`-role accounts
 carry the sample "devs" group, everyone else carries none.
@@ -50,6 +55,7 @@ PREFIX = {"u-": "user", "a-": "admin", "p-": "pending", "x-": "auditor"}
 
 _DEVS = {"id": "g-devs", "name": "devs"}
 _QA = {"id": "g-qa", "name": "qa"}
+_OPS = {"id": "g-ops", "name": "ops"}
 
 
 def role_for(uid: str) -> str | None:
@@ -76,6 +82,8 @@ def groups_for(uid: str, role: str) -> list:
         ]
     if "withgroups" in uid:
         return [_DEVS]
+    if "opsgroup" in uid:
+        return [_OPS]
     return [_DEVS] if role == "user" else []
 
 

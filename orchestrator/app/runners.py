@@ -44,7 +44,7 @@ from datetime import datetime, timezone
 import aiodocker
 
 from . import dockerapi, keys, labels as L, orientation, volumes
-from .config import Config
+from .config import Config, DEFAULT_PROFILE_NAME
 from .quota import MonitorQuota, QuotaExceeded
 
 log = logging.getLogger(__name__)
@@ -85,6 +85,11 @@ class Runner:
     created_at: float = field(default_factory=time.time)
     role: str = "user"
     memory: int = 0
+    # v2 (ADR-0012): the Policy profile this runner was created under, or
+    # DEFAULT_PROFILE_NAME. Restored by reconciliation from the durable
+    # label, same as `role` above, so an orchestrator restart never quietly
+    # relabels a mapped runner as default.
+    profile: str = DEFAULT_PROFILE_NAME
     # C7: set when this container replaced a torn-down one, so the proxy can
     # explain a stale process id instead of passing through a bare 404.
     replaced_reason: str | None = None
@@ -217,6 +222,7 @@ class RunnerManager:
                 port=self.cfg.runner_port,
                 memory=int((data.get("HostConfig") or {}).get("Memory") or 0),
                 role=lbls.get(L.ROLE, "user"),
+                profile=lbls.get(L.PROFILE, DEFAULT_PROFILE_NAME),
             )
             adopted += 1
         log.info("reconcile: adopted %d, reaped %d", adopted, reaped)
@@ -326,10 +332,33 @@ class RunnerManager:
 
     async def get_or_spawn(self, uid: str, policy=None) -> Runner:
         """`policy` comes from the role mapper (Lane C). It is applied at spawn
-        time only: a role change takes effect on the user's next runner, not
-        retroactively on a live one."""
-        nano = policy.nano_cpus if policy else self.cfg.runner_nano_cpus
-        mem = policy.memory if policy else self.cfg.runner_memory
+        time only: a role change (or a profile change, v2) takes effect on
+        the user's next runner, not retroactively on a live one.
+
+        v2 (ADR-0012, ticket 05): cpus/memory stay role-derived
+        (`policy.nano_cpus`/`.memory`, admin vs user, exactly as v1) when the
+        resolved profile is the implicit default -- this is what keeps an
+        empty GROUP_MAP a byte-for-byte no-op (ticket 01's guard) and admin's
+        larger limits intact when no group maps (ticket 05's own checklist).
+        A REAL mapped profile's cpus/memory fully replace the role-derived
+        ones instead: profiles apply uniformly to whoever is in the mapped
+        group, admin or not. Image and exec timeout are NOT role-derived in
+        v1, so they always come from the resolved profile -- the default
+        profile's image/exec_timeout equal cfg.runner_image/ot_execute_timeout
+        by construction (ticket 03), so this is a no-op by itself too.
+        """
+        profile = policy.profile if policy else None
+        if profile and profile.name != DEFAULT_PROFILE_NAME:
+            nano = profile.nano_cpus
+            mem = profile.memory
+        else:
+            nano = policy.nano_cpus if policy else self.cfg.runner_nano_cpus
+            mem = policy.memory if policy else self.cfg.runner_memory
+        image = profile.image if profile else self.cfg.runner_image
+        exec_timeout = (
+            profile.exec_timeout if profile else float(self.cfg.ot_execute_timeout)
+        )
+        profile_name = profile.name if profile else DEFAULT_PROFILE_NAME
         role = policy.role if policy else "user"
         lock = await self._lock_for(uid)
         async with lock:
@@ -347,7 +376,9 @@ class RunnerManager:
             # telling this user the budget is full.
             await self.prune_dead()
             self._admit(uid, mem)
-            return await self._spawn(uid, nano, mem, role)
+            return await self._spawn(
+                uid, nano, mem, role, image, exec_timeout, profile_name,
+            )
 
     # --- internals ------------------------------------------------------------
     async def _is_alive(self, runner: Runner) -> bool:
@@ -399,18 +430,24 @@ class RunnerManager:
             port=self.cfg.runner_port,
             memory=int((data.get("HostConfig") or {}).get("Memory") or 0),
             role=lbls.get(L.ROLE, "user"),
+            profile=lbls.get(L.PROFILE, DEFAULT_PROFILE_NAME),
         )
         self._runners[uid] = runner
         log.info("adopted existing runner %s for %s", name, uid)
         return runner
 
-    def _runner_env(self, key: str) -> list[str]:
+    def _runner_env(self, key: str, exec_timeout: float) -> list[str]:
         env = {
             "OPEN_TERMINAL_API_KEY": key,
             "OPEN_TERMINAL_MULTI_USER": "false",
             "OPEN_TERMINAL_FILE_BROWSER_ROOT": "home",
             "OPEN_TERMINAL_MAX_SESSIONS": str(self.cfg.ot_max_sessions),
-            "OPEN_TERMINAL_EXECUTE_TIMEOUT": str(self.cfg.ot_execute_timeout),
+            # v2: per-profile (ticket 05). round(), not int(): a profile
+            # declaring a sub-second value (unusual, but POLICY_*_EXEC_TIMEOUT
+            # accepts anything parse_duration does) should land on the
+            # nearest whole second the runner's own executor understands,
+            # not always truncate down.
+            "OPEN_TERMINAL_EXECUTE_TIMEOUT": str(round(exec_timeout)),
             "OPEN_TERMINAL_SESSION_CWD_TTL": str(self.cfg.ot_session_cwd_ttl),
         }
         # Package Seam (ADR-0008). Empty unless configured; there is no second
@@ -429,7 +466,8 @@ class RunnerManager:
         env.update(orientation.sandbox_env(self.cfg))
         return [f"{k}={v}" for k, v in env.items()]
 
-    async def _spawn(self, uid: str, nano_cpus: int, memory: int, role: str) -> Runner:
+    async def _spawn(self, uid: str, nano_cpus: int, memory: int, role: str,
+                      image: str, exec_timeout: float, profile_name: str) -> Runner:
         s_uid = safe_uid(uid)
         name = f"runner-{s_uid}"
         nonce = keys.mint_nonce()
@@ -440,13 +478,14 @@ class RunnerManager:
         )
 
         config = {
-            "Image": self.cfg.runner_image,
+            "Image": image,
             "Labels": L.build(
                 uid, nonce, self.cfg.runner_version,
                 datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 role=role, network=self.cfg.runners_network,
+                profile=profile_name,
             ),
-            "Env": self._runner_env(key),
+            "Env": self._runner_env(key, exec_timeout),
             "HostConfig": {
                 "NanoCpus": nano_cpus,
                 "Memory": memory,
@@ -503,7 +542,7 @@ class RunnerManager:
         runner = Runner(
             uid=uid, safe_uid=s_uid, container_id=data["Id"], name=name,
             nonce=nonce, key=key, port=self.cfg.runner_port, role=role,
-            memory=memory,
+            memory=memory, profile=profile_name,
             # Kept for the life of this container: any process id from the
             # previous incarnation stays invalid for as long as this one lives.
             replaced_reason=prior[0] if prior else None,

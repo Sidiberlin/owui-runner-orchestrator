@@ -20,6 +20,12 @@ ROLE = f"{NS}.role"
 # containers. Found live: a test stack adopted the production runner and tore
 # it down 60s later under its own shorter IDLE_TIMEOUT.
 NETWORK = f"{NS}.network"
+# v2 (ADR-0012, ticket 05): the Policy profile this runner was created under.
+# Same reasoning as ROLE below -- without it, reconciliation after a restart
+# silently relabels every runner "default", which is wrong for any runner
+# that was actually spawned under a mapped profile and would misreport its
+# resource/exec-timeout provenance to an operator or to ticket 07's sweeper.
+PROFILE = f"{NS}.profile"
 
 # Identifies anything this orchestrator owns, for list filters and reaping.
 MANAGED = f"{NS}.managed"
@@ -27,7 +33,12 @@ MANAGED_VALUE = "1"
 
 
 def build(uid: str, nonce: str, version: str, created_at: str,
-          role: str = "user", network: str = "") -> dict[str, str]:
+          role: str = "user", network: str = "",
+          profile: str = "default") -> dict[str, str]:
+    # profile's default ("default") is a plain literal, not imported from
+    # config.DEFAULT_PROFILE_NAME, matching this module's existing style of
+    # not depending on `config` (see ROLE's own "user" literal default) --
+    # keep the two in sync if either ever changes.
     return {
         MANAGED: MANAGED_VALUE,
         UID: uid,
@@ -39,4 +50,5 @@ def build(uid: str, nonce: str, version: str, created_at: str,
         # which misleads an operator reading /_orch/runners after a restart.
         ROLE: role,
         NETWORK: network,
+        PROFILE: profile,
     }

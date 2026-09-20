@@ -105,6 +105,105 @@ def test_teardown_removes_the_container_but_keeps_the_volume(
     assert len(vols) == 1, "the user's workspace was destroyed with the container"
 
 
+# ---------------------------------------------------------------------------
+# Ticket 05 (v2.0 group policy profiles, docs/adr/0012): spawn-time
+# application. env.test maps GROUP_MAP=ops:heavy to a group ONLY a uid
+# containing "opsgroup" ever carries (tests/stub_owui.py groups_for), so
+# every other test's users are unaffected and keep resolving to the default
+# profile -- this is what keeps ticket 01's no-op guard meaningful alongside
+# these tests in the same stack.
+# ---------------------------------------------------------------------------
+def _opsgroup_uid(tag: str) -> str:
+    return f"u-opsgroup-{tag}"
+
+
+def test_a_mapped_profile_produces_a_genuinely_different_container(
+        api, stack, cleanup_runners):
+    """Two profiles, two containers -- proven via the Docker API, matching
+    tests/integration/test_noop_guard.py's own hand-written v1 baseline
+    (USER_NANO_CPUS=500_000_000, USER_MEMORY=320 MiB) for the default side,
+    so this fails if either file's env.test assumptions ever drift apart."""
+    default_uid = "u-plain-profile-check"
+    heavy_uid = _opsgroup_uid("resources")
+    cleanup_runners.extend([default_uid, heavy_uid])
+
+    assert api.get("/system", headers=stack.user_headers(default_uid)).status_code == 200
+    assert api.get("/system", headers=stack.user_headers(heavy_uid)).status_code == 200
+
+    default_name = runner_name_for(default_uid)
+    heavy_name = runner_name_for(heavy_uid)
+
+    # env.test: POLICY_HEAVY_CPUS=1, POLICY_HEAVY_MEMORY=200m -- distinct
+    # from both the plain-user and admin v1 baselines.
+    assert inspect(default_name, "{{.HostConfig.NanoCpus}}") == "500000000"
+    assert inspect(default_name, "{{.HostConfig.Memory}}") == str(320 * 1024**2)
+    assert inspect(heavy_name, "{{.HostConfig.NanoCpus}}") == "1000000000"
+    assert inspect(heavy_name, "{{.HostConfig.Memory}}") == str(200 * 1024**2)
+
+    profile_label = '{{index .Config.Labels "io.owui.runner.profile"}}'
+    assert inspect(default_name, profile_label) == "default"
+    assert inspect(heavy_name, profile_label) == "heavy"
+
+    # env.test: POLICY_HEAVY_EXEC_TIMEOUT=45s -- the exec timeout riding in
+    # the runner's own environment, distinct from the global 120.
+    heavy_env = dict(
+        line.split("=", 1) for line in
+        inspect(heavy_name, "{{range .Config.Env}}{{println .}}{{end}}").splitlines()
+        if "=" in line
+    )
+    assert heavy_env["OPEN_TERMINAL_EXECUTE_TIMEOUT"] == "45"
+
+
+def test_admin_limits_are_untouched_when_no_profile_matches(
+        api, stack, admin_uid, cleanup_runners):
+    """The other half of ticket 05's own checklist: an admin outside any
+    mapped group keeps its role-derived limits exactly as in v1 -- a profile
+    system that exists must not demote anyone it does not actually apply to.
+    (test_noop_guard.py's admin test already proves this byte-for-byte; this
+    is the same guarantee, phrased against the ticket 05 spawn path directly,
+    in a stack that -- unlike the no-op guard's -- has a non-empty
+    GROUP_MAP/POLICY_* configured.)"""
+    cleanup_runners.append(admin_uid)
+    assert api.get("/system", headers=stack.user_headers(admin_uid)).status_code == 200
+    name = runner_name_for(admin_uid)
+    assert inspect(name, "{{.HostConfig.Memory}}") == str(384 * 1024**2)
+    profile_label = '{{index .Config.Labels "io.owui.runner.profile"}}'
+    assert inspect(name, profile_label) == "default"
+
+
+def test_profile_survives_an_orchestrator_restart(api, stack, cleanup_runners):
+    """A4 x ticket 05: reconciliation restores the profile label a runner was
+    created under, rather than silently relabelling it "default"."""
+    heavy_uid = _opsgroup_uid("restart")
+    cleanup_runners.append(heavy_uid)
+    assert api.get("/system", headers=stack.user_headers(heavy_uid)).status_code == 200
+    name = runner_name_for(heavy_uid)
+    before = inspect(name, "{{.Id}}")
+
+    stack.restart_orchestrator()
+
+    assert inspect(name, "{{.Id}}") == before, "runner was respawned"
+    rows = api.get("/_orch/runners", headers=stack.orch_headers()).json()
+    assert any(r["uid"] == heavy_uid for r in rows), "runner was not adopted"
+    profile_label = '{{index .Config.Labels "io.owui.runner.profile"}}'
+    assert inspect(name, profile_label) == "heavy", \
+        "reconciliation must restore the profile a runner was created under"
+
+
+def test_a_mapped_profiles_memory_is_what_the_budget_sees(
+        api, stack, cleanup_runners):
+    """Per-profile memory flows through the SAME committed-memory accounting
+    the Budget's admission check reads -- not the default's -- so a generous
+    profile can actually be refused rather than silently overcommitting."""
+    purge_runners()
+    heavy_uid = _opsgroup_uid("budget")
+    cleanup_runners.append(heavy_uid)
+    assert api.get("/system", headers=stack.user_headers(heavy_uid)).status_code == 200
+    status = api.get("/_orch/status", headers=stack.orch_headers()).json()
+    assert status["committed_memory_mb"] == 200, \
+        "committed memory must reflect the mapped profile, not the default"
+
+
 def test_a_container_lost_out_of_band_frees_its_budget_slot(
         api, stack, cleanup_runners):
     """Regression for the phantom-slot bug this suite found.

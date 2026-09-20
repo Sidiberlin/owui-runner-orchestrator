@@ -189,6 +189,21 @@ services:
       - no-new-privileges
       - apparmor=unconfined          # N5
     cap_drop: [ALL]
+    # v2 (ADR-0012): POLICY_<NAME>_<FIELD> is an open-ended family -- an
+    # operator adding a new profile must be a var in .env, not a
+    # docker-compose.yml edit (the whole point: "granting better limits is a
+    # config change, not a redeploy"). A static `environment:` list cannot
+    # enumerate an unknown-in-advance set of names, so this bulk-loads
+    # whichever file compose was pointed at for substitution -- `.env` by
+    # default (matching every other var below's own default), or
+    # tests/env.test for the suite (env.test declares ENV_FILE_NAME itself,
+    # self-referentially, so this resolves to the same file --env-file
+    # already points substitution at). Every var also explicitly listed below
+    # still wins on conflict (`environment:` overrides `env_file:` for the
+    # same key) -- this only ever ADDS coverage for names that list cannot
+    # name in advance.
+    env_file:
+      - ${ENV_FILE_NAME:-.env}
     environment:
       DOCKER_HOST: tcp://docker-socket-proxy:2375
 
@@ -237,6 +252,12 @@ services:
       ADMIN_RUNNER_CPUS:      ${ADMIN_RUNNER_CPUS:-}
       ADMIN_RUNNER_MEMORY:    ${ADMIN_RUNNER_MEMORY:-}
       ADMIN_RUNNER_DISK_SOFT: ${ADMIN_RUNNER_DISK_SOFT:-}
+      # --- policy profiles (ADR-0012, v2) --------------------------------------
+      # GROUP_MAP is a single, fixed-name var, so it is listed here like every
+      # other knob. POLICY_<NAME>_<FIELD> is not (see the env_file: comment
+      # above): each declared profile's own vars reach the container through
+      # that bulk passthrough instead of a line here.
+      GROUP_MAP: ${GROUP_MAP:-}
       # Q5 denylist. Everything not listed here is forwarded to the runner.
       PROXY_DENY_PREFIXES:    ${PROXY_DENY_PREFIXES:-/proxy,/ports,/api/terminals}
       # CSP injected on /files/serve responses. Agent-authored HTML is
