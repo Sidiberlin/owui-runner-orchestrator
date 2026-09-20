@@ -786,3 +786,98 @@ based test.
   worked example's concrete numbers: arbitrary, but a `data-science`-flavoured
   example matches the spec's own "an evaluation group" / "a heavy user"
   motivating language rather than an abstract `foo`/`bar`.
+
+### Ticket 10 — two-profile rehearsal on a throwaway stack (STOP POINT)
+- Commit: `cc65d57` docs(v2): 10 two-profile rehearsal runbook (STOP
+  POINT) — pushed: no (unpushed: `cc65d57`; `git push origin main` failed
+  with "Invalid username or token", the documented broken-push-auth state,
+  not retried)
+- What: evidence and a runbook, no code. Stood up a fully separate,
+  throwaway compose project (`-p owui-rehearsal`, its own network
+  (`owui-runners-rehearsal`), its own OWUI stand-in network
+  (`owui-rehearsal-owui`), its own throwaway stub OWUI container) driven by
+  a new `.scratch/owui-runner-rebase-v2/rehearsal.env` — modeled on
+  `.env.example`, all four secrets fake, `OWUI_BASE_URL` pointed at the
+  throwaway stub, never `192.168.138.101`. Every `docker compose` invocation
+  used `--env-file .scratch/owui-runner-rebase-v2/rehearsal.env` explicitly;
+  the real repo-root `.env` (confirmed to genuinely point at the live host
+  and `open-webui_default`) was never read, referenced, or touched.
+  `docker-compose.yml`'s `env_file: ${ENV_FILE_NAME:-.env}` mechanism
+  (ticket 05) was exercised in its real, self-referential form —
+  `rehearsal.env` declares its own `ENV_FILE_NAME`, exactly the pattern
+  `tests/env.test` already uses, now proven a second, independent way
+  outside the pytest harness.
+- Rehearsed and captured (full evidence table in the runbook): boot table
+  with two profiles; the unknown-mapped-group warning (`ghost-team`, a
+  group deliberately absent from the stub's roster); two genuinely
+  different containers (`docker inspect`'d NanoCpus/Memory, not just the
+  API's own claim); differing `SANDBOX_EGRESS`; a controlled
+  shorter-idle-reclaimed-while-default-survives run (`eval`'s 20s profile
+  torn down at 22s idle while `default`'s 90s-timeout sibling was still up
+  at 50s); restart adoption preserving both the profile name AND the
+  numeric idle-timeout label; the empty-mapping no-op on the SAME build
+  (`rehearsal-rollback.env`, `GROUP_MAP=` blank, `POLICY_EVAL_*` left
+  declared — orchestrator container recreated, no image rebuild); and the
+  rollback's two-sided behaviour specifically — an already-live `eval`
+  runner is untouched by the rollback (same container `Id`, same labels,
+  same env, even after the restart that applied it), while that same user's
+  *next* runner (explicit teardown + respawn) correctly landed on
+  `default`. One rehearsal-setup snag flagged in the runbook, not a code
+  defect: the stub OWUI container was started slightly after the
+  orchestrator on the very first boot, so the first unknown-group check hit
+  the documented best-effort DNS-failure skip rather than the real warning
+  — a sequencing note for the live cutover's own boot order, not a bug.
+- Runbook: `.scratch/owui-runner-rebase-v2/RUNBOOK-v2-cutover.md` — the
+  full evidence table above, the exact `POLICY_<NAME>_*`/`GROUP_MAP`
+  template block for `.env` (values are the stakeholder's decision, not
+  this rehearsal's), five post-apply checks, and the rollback note stated
+  plainly: blanking `GROUP_MAP` is sufficient and takes effect at the next
+  restart for every user's next runner; a runner already live when the
+  rollback lands is never retroactively touched, in either direction.
+- Suite ("full suite green on the final build" — current HEAD, all of
+  tickets 01-09's changes together, not per-ticket): full batched run,
+  every batch clean: unit 144/144; batch A (auth/denylist/devguard/
+  discovery/egress/isolation/orientation/lifecycle/ownership/persistence/
+  proxy/quota) 132 passed/12 skipped, 570s; batch B (idle/roles/
+  noop_guard) 31/31, 633s; `test_resources.py` + `test_shims.py` 10/10.
+  `git diff --stat` / `git status`: zero changes under `orchestrator/` or
+  `tests/` this ticket — only three new files under
+  `.scratch/owui-runner-rebase-v2/` (`rehearsal.env`,
+  `rehearsal-rollback.env`, `RUNBOOK-v2-cutover.md`), matching "evidence,
+  not code" exactly.
+- **Explicit STOP, honoured:** no ssh anywhere. No edit to the real
+  `.env`(only its own throwaway copies under `.scratch/`). No touch to
+  `open-webui_default` or any resource named for the live deployment. No
+  connection ever attempted to `192.168.138.101`. The throwaway stack (all
+  containers, both throwaway networks, the named volume) was fully torn
+  down at the end of the rehearsal — verified clean via `docker ps -a` /
+  `docker network ls` before writing this entry. The live cutover itself
+  remains explicitly out of scope, Hermes' to perform from the runbook
+  above.
+- Notes: Judgment call — reused `tests/stub_owui.py`'s existing sample
+  group `ops` (rather than inventing a new stub group or modifying the
+  shared stub file) for the rehearsal's "mapped" demo, keeping this ticket
+  genuinely code-change-free as its own checklist demands. Judgment call —
+  deliberately spent extra rehearsal steps proving the ROLLBACK's two-sided
+  behaviour (live runner untouched vs. next spawn changed) rather than
+  just the forward mapping, since the ticket's own checklist explicitly
+  asks for "what removing GROUP_MAP restores, and when it takes effect for
+  a live runner" — a question the automated suite answers structurally
+  (ticket 05's "never mutates a live one" tests) but had not been
+  demonstrated end-to-end as an actual sequence of operator actions before
+  this ticket.
+
+## Chain complete: tickets 01-10
+
+All ten tickets in `.scratch/owui-runner-rebase-v2/issues/` are committed
+locally, in order, each with its own full-suite verification and (from
+ticket 03 onward) the retroactive image-freshness/compose-wiring fix noted
+in ticket 05's entry. Commits `2c9e5ba` through the ticket-10 entries above
+are all still unpushed (`git push origin main` has failed identically —
+"Invalid username or token" — on every attempt across the whole run;
+Hermes/the stakeholder owns pushing this backlog and the live cutover
+itself, per this file's standing push note and ticket 10's own STOP). No
+ticket required a coordinator judgment call beyond the two protocols
+already ratified before this session began (host-contention tolerance,
+ticket 01/02; the suite-run-reliability addendum this session added at
+ticket 04).
