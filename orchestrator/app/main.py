@@ -95,6 +95,17 @@ async def lifespan(app: FastAPI):
             name, p.nano_cpus / 1_000_000_000, p.memory // 1024**2,
             p.idle_timeout, p.exec_timeout, p.image, p.egress,
         )
+    # ADR-0012 seam 6: a GROUP_MAP entry naming a group OWUI's roster does
+    # not currently contain (renamed or deleted) silently demotes its
+    # members to the default profile -- warn loudly here so that shows up in
+    # seconds, not as a mystery incident weeks later. Best-effort: see
+    # RoleMapper.unknown_mapped_groups.
+    for group in await mapper.unknown_mapped_groups():
+        log.warning(
+            "GROUP_MAP names group %r, which Open WebUI's roster does not "
+            "currently contain (renamed or deleted?); its members fall back "
+            "to the default profile", group,
+        )
     try:
         yield
     finally:
@@ -275,9 +286,13 @@ async def proxy_to_runner(path: str, request: Request) -> Response:
         raise HTTPException(502, f"could not start your runner: {exc}") from exc
     # Operational visibility: who asked for what. No secrets — the uid is the
     # OWUI user id that OWUI itself put on the wire, and the key never appears.
+    # profile (ticket 04): resolved per request, not yet applied to any
+    # container (ticket 05) — logged here so a mapping change is visible
+    # immediately, ahead of any user-facing effect.
     log.info(
-        "%s /%s uid=%s role=%s -> %s",
-        request.method, path, policy.uid, policy.role, runner.name,
+        "%s /%s uid=%s role=%s profile=%s -> %s",
+        request.method, path, policy.uid, policy.role,
+        policy.profile.name if policy.profile else None, runner.name,
     )
 
     # Held for the whole proxied call so the idle sweep cannot tear this

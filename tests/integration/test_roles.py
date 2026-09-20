@@ -13,7 +13,7 @@ import time
 
 import pytest
 
-from app.config import Config
+from app.config import Config, DEFAULT_PROFILE_NAME, build_profiles, parse_group_map
 from app.roles import AccessDenied, Policy, RoleMapper
 from conftest import HERE
 
@@ -137,8 +137,26 @@ def group_stub():
             proc.wait(timeout=10)
 
 
-def _cfg(base_url: str) -> Config:
-    """Just enough Config for RoleMapper; every other field is unused here."""
+def _cfg(base_url: str, *, group_map_raw: str = "", extra_policy_env: dict | None = None) -> Config:
+    """Just enough Config for RoleMapper; every other field is unused here.
+
+    ticket 04: `profiles` must be populated the same way `Config.from_env()`
+    populates it (via `build_profiles`) -- `RoleMapper._policy()` now always
+    calls `resolve_profile()`, which assumes `profiles[DEFAULT_PROFILE_NAME]`
+    exists. `group_map_raw`/`extra_policy_env` let a test declare an extra
+    named profile and a GROUP_MAP that references it, same as an operator
+    would via POLICY_<NAME>_* + GROUP_MAP env vars.
+    """
+    profiles = build_profiles(
+        default_nano_cpus=500_000_000,
+        default_memory=320 * 1024**2,
+        default_idle_timeout=60.0,
+        default_exec_timeout=120.0,
+        default_image="unused:dev",
+        default_egress="BLOCKED",
+        environ=extra_policy_env or {},
+    )
+    group_map = parse_group_map(group_map_raw, profiles)
     return Config(
         orch_api_key="unused",
         master_secret="unused",
@@ -158,6 +176,8 @@ def _cfg(base_url: str) -> Config:
         admin_memory=384 * 1024**2,
         admin_disk_soft=5 * 1024**3,
         disk_soft=5 * 1024**3,
+        profiles=profiles,
+        group_map=group_map,
     )
 
 
@@ -236,3 +256,101 @@ def test_an_unrecognised_role_is_still_denied_even_with_group_membership(group_s
 def test_an_unknown_user_is_still_denied(group_stub):
     with pytest.raises(AccessDenied):
         _resolve(_cfg(group_stub), "nobody-this-stub-has-never-heard-of")
+
+
+# ---------------------------------------------------------------------------
+# Ticket 04 (v2.0 group policy profiles, docs/adr/0012): GROUP_MAP resolution
+# attached to Policy, and the best-effort unknown-mapped-group boot check.
+# Same stub, same "genuine HTTP round trip against the documented-contract
+# stand-in" discipline as ticket 02 above -- groups are still not applied to
+# any container in this slice (that is ticket 05), only resolved and carried
+# on Policy.profile.
+# ---------------------------------------------------------------------------
+
+def test_policy_resolves_to_the_mapped_profile(group_stub):
+    cfg = _cfg(group_stub, group_map_raw="devs:heavy",
+               extra_policy_env={"POLICY_HEAVY_CPUS": "4"})
+    policy = _resolve(cfg, "u-grouped-1")  # -> devs (see groups_for's default)
+    assert policy.groups == ("devs",)
+    assert policy.profile.name == "heavy"
+    assert policy.profile.nano_cpus == 4_000_000_000
+
+
+def test_policy_falls_back_to_default_for_an_unmapped_group(group_stub):
+    cfg = _cfg(group_stub, group_map_raw="qa:heavy",
+               extra_policy_env={"POLICY_HEAVY_CPUS": "4"})
+    policy = _resolve(cfg, "u-grouped-1")  # devs, not qa -- not mapped
+    assert policy.profile.name == DEFAULT_PROFILE_NAME
+
+
+def test_policy_falls_back_to_default_with_no_group_map_configured(group_stub):
+    policy = _resolve(_cfg(group_stub), "u-grouped-1")
+    assert policy.profile.name == DEFAULT_PROFILE_NAME
+
+
+def test_policy_falls_back_to_default_for_an_ungrouped_user(group_stub):
+    cfg = _cfg(group_stub, group_map_raw="devs:heavy",
+               extra_policy_env={"POLICY_HEAVY_CPUS": "4"})
+    policy = _resolve(cfg, "u-nogroups-1")
+    assert policy.profile.name == DEFAULT_PROFILE_NAME
+
+
+def test_a_user_in_several_groups_resolves_by_mapping_priority(group_stub):
+    cfg = _cfg(
+        group_stub, group_map_raw="qa:light,devs:heavy",
+        extra_policy_env={"POLICY_HEAVY_CPUS": "4", "POLICY_LIGHT_CPUS": "1"},
+    )
+    policy = _resolve(cfg, "u-multigroup-1")  # devs + qa
+    assert policy.profile.name == "light", "qa:light is listed first in GROUP_MAP"
+
+
+def test_a_pending_account_in_a_mapped_group_is_still_denied(group_stub):
+    """Group membership never grants access -- a mapped group only selects a
+    profile once admission is already decided (spec.md: "group membership
+    never grants or removes access")."""
+    cfg = _cfg(group_stub, group_map_raw="devs:heavy",
+               extra_policy_env={"POLICY_HEAVY_CPUS": "4"})
+    with pytest.raises(AccessDenied):
+        _resolve(cfg, "p-withgroups-1")
+
+
+def test_an_unrecognised_role_in_a_mapped_group_is_still_denied(group_stub):
+    cfg = _cfg(group_stub, group_map_raw="devs:heavy",
+               extra_policy_env={"POLICY_HEAVY_CPUS": "4"})
+    with pytest.raises(AccessDenied):
+        _resolve(cfg, "x-withgroups-1")
+
+
+def _unknown_groups(cfg: Config) -> list:
+    async def _run():
+        mapper = RoleMapper(cfg)
+        try:
+            return await mapper.unknown_mapped_groups()
+        finally:
+            await mapper.aclose()
+    return asyncio.run(_run())
+
+
+def test_unknown_mapped_groups_flags_a_group_the_roster_does_not_know(group_stub):
+    cfg = _cfg(group_stub, group_map_raw="devs:heavy,ghost-team:heavy",
+               extra_policy_env={"POLICY_HEAVY_CPUS": "4"})
+    assert _unknown_groups(cfg) == ["ghost-team"]
+
+
+def test_unknown_mapped_groups_is_empty_when_every_mapped_group_is_known(group_stub):
+    cfg = _cfg(group_stub, group_map_raw="devs:heavy,qa:heavy",
+               extra_policy_env={"POLICY_HEAVY_CPUS": "4"})
+    assert _unknown_groups(cfg) == []
+
+
+def test_unknown_mapped_groups_is_empty_with_no_group_map(group_stub):
+    """No OWUI round trip is needed -- or made -- when GROUP_MAP is unset."""
+    assert _unknown_groups(_cfg(group_stub)) == []
+
+
+def test_unknown_mapped_groups_is_best_effort_against_an_unreachable_owui():
+    """Never raises: an OWUI the orchestrator cannot currently reach is a
+    reason to skip the check, not to fail the boot sequence."""
+    cfg = _cfg("http://127.0.0.1:1", group_map_raw="devs:heavy",
+               extra_policy_env={"POLICY_HEAVY_CPUS": "4"})
+    assert _unknown_groups(cfg) == []

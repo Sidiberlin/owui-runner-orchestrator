@@ -248,6 +248,93 @@ def build_profiles(
     return profiles
 
 
+# --- GROUP_MAP (ADR-0012, ticket 04) -----------------------------------------
+# The mapping: which OWUI group selects which already-declared Profile.
+# Resolution never denies -- that stays the role check's and the allowlist's
+# job alone; this module only ever returns a Profile.
+
+def parse_group_map(
+    raw: str, profiles: dict[str, Profile],
+) -> tuple[tuple[str, str], ...]:
+    """GROUP_MAP="group:profile,group2:profile2" -> an ordered
+    ((group_name, profile_name), ...) tuple. Order is priority:
+    `resolve_profile` returns the first entry whose group the caller belongs
+    to. `profile_name` is looked up case-insensitively (lower-cased here) to
+    match how POLICY_<NAME>_* profile names are stored; `group_name` is kept
+    exactly as written and matched case-sensitively against OWUI's own group
+    names in `resolve_profile` -- unlike a profile name (our own env-var-
+    driven identifier), a GROUP_MAP group name is the operator's copy of a
+    real OWUI display name and silently folding its case could match two
+    OWUI groups that differ only by case as if they were one.
+
+    A stray or trailing comma produces an empty entry, which is skipped, not
+    an error -- the same tolerance `_csv()` already gives every other
+    comma-separated knob. Everything else is loud: an entry with no `:`, an
+    empty group or profile half, a group name repeated across entries (only
+    the first occurrence could ever be reached, so a repeat is always a
+    copy-paste mistake, never intentional), or a profile name `build_profiles`
+    did not declare, all fail startup rather than silently doing something
+    plausible-looking with a malformed line.
+    """
+    entries: list[tuple[str, str]] = []
+    seen_groups: set[str] = set()
+    for raw_entry in raw.split(","):
+        entry = raw_entry.strip()
+        if not entry:
+            continue
+        if ":" not in entry:
+            raise RuntimeError(
+                f"GROUP_MAP entry {entry!r} is missing ':profile' "
+                "(expected group:profile)"
+            )
+        group, _, profile_name = entry.partition(":")
+        group = group.strip()
+        profile_name = profile_name.strip().lower()
+        if not group:
+            raise RuntimeError(f"GROUP_MAP entry {entry!r} has an empty group name")
+        if not profile_name:
+            raise RuntimeError(f"GROUP_MAP entry {entry!r} has an empty profile name")
+        if group in seen_groups:
+            raise RuntimeError(
+                f"GROUP_MAP names group {group!r} more than once; only the "
+                "first entry for a group is ever reachable (first match "
+                "wins), so a repeat is always a mistake"
+            )
+        if profile_name not in profiles:
+            raise RuntimeError(
+                f"GROUP_MAP maps group {group!r} to undeclared profile "
+                f"{profile_name!r} (declared profiles: "
+                f"{', '.join(sorted(profiles))})"
+            )
+        seen_groups.add(group)
+        entries.append((group, profile_name))
+    return tuple(entries)
+
+
+def resolve_profile(
+    caller_groups: tuple[str, ...] | list[str],
+    group_map: tuple[tuple[str, str], ...],
+    profiles: dict[str, Profile],
+) -> Profile:
+    """Pure. The first `group_map` entry (left to right) whose group the
+    caller belongs to wins; no group, an unmapped group, and a renamed
+    (no-longer-matching) group all fall back to `profiles[DEFAULT_PROFILE_
+    NAME]`. Can never deny: this always returns a Profile, never raises for
+    a caller that matches nothing -- denial is the role check's and the
+    allowlist's job alone, and profiles only ever tune.
+
+    Assumes `profiles` was built by `build_profiles` (so DEFAULT_PROFILE_NAME
+    is present) and `group_map` was built by `parse_group_map` against that
+    same `profiles` (so every referenced profile name already exists) --
+    both true for every Config built via `Config.from_env()`.
+    """
+    caller = set(caller_groups)
+    for group, profile_name in group_map:
+        if group in caller:
+            return profiles[profile_name]
+    return profiles[DEFAULT_PROFILE_NAME]
+
+
 @dataclass(frozen=True)
 class Config:
     # --- auth -----------------------------------------------------------
@@ -314,6 +401,10 @@ class Config:
     # Always contains at least DEFAULT_PROFILE_NAME. Empty only for a Config
     # built by hand (tests) rather than via from_env().
     profiles: dict[str, Profile] = field(default_factory=dict)
+    # Ordered (group_name, profile_name) pairs, priority left to right.
+    # Empty is a behavioural no-op: resolve_profile always falls back to
+    # DEFAULT_PROFILE_NAME with nothing to match against.
+    group_map: tuple[tuple[str, str], ...] = ()
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -335,6 +426,7 @@ class Config:
             default_image=runner_image,
             default_egress=DEFAULT_EGRESS_STANCE,
         )
+        group_map = parse_group_map(os.getenv("GROUP_MAP", ""), profiles)
 
         return cls(
             orch_api_key=_req("ORCH_API_KEY"),
@@ -395,4 +487,5 @@ class Config:
             if os.getenv("RUNNER_MEMORY_BUDGET", "").strip() else 0,
             runner_version=os.getenv("RUNNER_VERSION", "1"),
             profiles=profiles,
+            group_map=group_map,
         )

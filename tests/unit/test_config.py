@@ -6,7 +6,9 @@ from app.config import (
     DEFAULT_PROFILE_NAME,
     build_profiles,
     parse_duration,
+    parse_group_map,
     parse_size,
+    resolve_profile,
 )
 
 
@@ -218,3 +220,111 @@ def test_profile_named_default_is_rejected():
     it is reserved and always a startup error."""
     with pytest.raises(RuntimeError):
         _profiles(POLICY_DEFAULT_CPUS="4")
+
+
+# --- GROUP_MAP parsing and resolution (ADR-0012, ticket 04) -----------------
+# Pure functions, unit-tested without Docker or OWUI as the ticket requires.
+
+def test_group_map_parses_ordered_pairs():
+    profiles = _profiles(POLICY_HEAVY_CPUS="4", POLICY_LIGHT_CPUS="1")
+    gm = parse_group_map("devs:heavy, qa:light", profiles)
+    assert gm == (("devs", "heavy"), ("qa", "light"))
+
+
+def test_group_map_tolerates_stray_and_trailing_commas():
+    """A stray comma is not a config error -- same tolerance _csv() already
+    gives every other comma-separated knob."""
+    profiles = _profiles(POLICY_HEAVY_CPUS="4")
+    assert parse_group_map(",devs:heavy,,", profiles) == (("devs", "heavy"),)
+
+
+def test_group_map_empty_string_is_empty_tuple():
+    profiles = _profiles()
+    assert parse_group_map("", profiles) == ()
+    assert parse_group_map("   ", profiles) == ()
+
+
+def test_group_map_profile_name_is_case_normalised():
+    """Matches how POLICY_<NAME>_* profile names are stored: lower-cased."""
+    profiles = _profiles(POLICY_HEAVY_CPUS="4")
+    assert parse_group_map("devs:HEAVY", profiles) == (("devs", "heavy"),)
+
+
+def test_group_map_group_name_case_is_preserved():
+    """Unlike the profile half, the group half is the operator's copy of a
+    real OWUI display name and is kept exactly as written."""
+    profiles = _profiles(POLICY_HEAVY_CPUS="4")
+    assert parse_group_map("Devs:heavy", profiles) == (("Devs", "heavy"),)
+
+
+@pytest.mark.parametrize("bad", ["devs", "devs:", ":heavy", "  :  "])
+def test_group_map_malformed_entry_fails_startup(bad):
+    profiles = _profiles(POLICY_HEAVY_CPUS="4")
+    with pytest.raises(RuntimeError):
+        parse_group_map(bad, profiles)
+
+
+def test_group_map_entry_naming_an_undeclared_profile_fails_startup():
+    profiles = _profiles()
+    with pytest.raises(RuntimeError):
+        parse_group_map("devs:ghost", profiles)
+
+
+def test_group_map_duplicate_group_name_fails_startup():
+    """Only the first entry for a repeated group could ever be reached
+    (first match wins), so a repeat is always a copy-paste mistake, not
+    intentional redundancy -- the documented duplicate rule."""
+    profiles = _profiles(POLICY_HEAVY_CPUS="4", POLICY_LIGHT_CPUS="1")
+    with pytest.raises(RuntimeError):
+        parse_group_map("devs:heavy,devs:light", profiles)
+
+
+def test_resolve_profile_first_match_wins_in_priority_order():
+    profiles = _profiles(POLICY_HEAVY_CPUS="4", POLICY_LIGHT_CPUS="1")
+    gm = (("devs", "heavy"), ("qa", "light"))
+    resolved = resolve_profile(("qa", "devs"), gm, profiles)
+    assert resolved.name == "heavy"
+
+
+def test_resolve_profile_priority_is_the_mapping_order_not_the_callers_order():
+    profiles = _profiles(POLICY_HEAVY_CPUS="4", POLICY_LIGHT_CPUS="1")
+    gm = (("qa", "light"), ("devs", "heavy"))
+    resolved = resolve_profile(("devs", "qa"), gm, profiles)
+    assert resolved.name == "light"
+
+
+def test_resolve_profile_no_group_falls_back_to_default():
+    profiles = _profiles(POLICY_HEAVY_CPUS="4")
+    resolved = resolve_profile((), (("devs", "heavy"),), profiles)
+    assert resolved.name == DEFAULT_PROFILE_NAME
+
+
+def test_resolve_profile_unmapped_group_falls_back_to_default():
+    profiles = _profiles(POLICY_HEAVY_CPUS="4")
+    resolved = resolve_profile(("marketing",), (("devs", "heavy"),), profiles)
+    assert resolved.name == DEFAULT_PROFILE_NAME
+
+
+def test_resolve_profile_a_renamed_group_falls_back_to_default():
+    """A group no longer present among the caller's OWUI groups (renamed or
+    removed) is indistinguishable, from resolution's point of view, from an
+    unmapped group -- both just fail to match, and default is the answer for
+    both. This is the "renamed group" story from the spec."""
+    profiles = _profiles(POLICY_HEAVY_CPUS="4")
+    resolved = resolve_profile(("devs-renamed",), (("devs", "heavy"),), profiles)
+    assert resolved.name == DEFAULT_PROFILE_NAME
+
+
+def test_resolve_profile_empty_mapping_is_always_default():
+    """The no-op guarantee: an empty GROUP_MAP resolves every caller, no
+    matter their groups, to the default profile."""
+    profiles = _profiles(POLICY_HEAVY_CPUS="4")
+    resolved = resolve_profile(("devs", "anything"), (), profiles)
+    assert resolved.name == DEFAULT_PROFILE_NAME
+
+
+def test_resolve_profile_never_raises():
+    """No path through resolution can deny a request -- denial is the role
+    check's and the allowlist's job alone."""
+    profiles = _profiles()
+    resolve_profile(("nonsense", "groups", "here"), (), profiles)

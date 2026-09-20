@@ -19,6 +19,16 @@ ENDPOINT, VERIFIED AGAINST OWUI SOURCE (routers/users.py)
     as the stable identifier for diagnostics. Both come from this same
     response; no extra OWUI round trip is introduced.
 
+    v2 ticket 04 (GROUP_MAP resolution): Policy.profile now carries the
+    resolved Policy profile (config.Profile) for these groups — first entry
+    in cfg.group_map whose group the caller belongs to, default profile
+    otherwise. Resolution is recomputed fresh on every call to `_policy()`
+    (both the TTL-cache-hit branch and the fresh-fetch branch) rather than
+    cached alongside role/groups: it is a pure, in-memory lookup against
+    already-cached groups, so caching it separately would only add a second
+    place it could go stale for no performance benefit. Still not applied to
+    any container in this slice — that is ticket 05.
+
 FAIL-CLOSED (A8)
     A role we cannot verify is not a role. On any OWUI failure we serve a
     cached answer for up to ROLE_CACHE_GRACE, then refuse with 503. We never
@@ -33,7 +43,7 @@ from dataclasses import dataclass, field
 
 import httpx
 
-from .config import Config
+from .config import Config, Profile, resolve_profile
 
 log = logging.getLogger(__name__)
 
@@ -79,6 +89,10 @@ class Policy:
     role: str
     groups: tuple[str, ...] = ()       # group NAMES — the v2 GROUP_MAP match key
     group_ids: tuple[str, ...] = ()    # same membership's ids, for diagnostics
+    # The resolved v2 Policy profile (config.Profile) for `groups`, or None
+    # for a Policy built by hand (tests) rather than through RoleMapper,
+    # which always resolves one. Not yet applied to any container (ticket 05).
+    profile: Profile | None = None
     nano_cpus: int = 0
     memory: int = 0
     disk_soft: int = 0
@@ -107,15 +121,16 @@ class RoleMapper:
 
     def _policy(self, uid: str, role: str, groups: tuple[str, ...],
                 group_ids: tuple[str, ...]) -> Policy:
+        profile = resolve_profile(groups, self.cfg.group_map, self.cfg.profiles)
         if role == ROLE_ADMIN:
             return Policy(
-                uid, role, groups, group_ids,
+                uid, role, groups, group_ids, profile,
                 nano_cpus=self.cfg.admin_nano_cpus,
                 memory=self.cfg.admin_memory,
                 disk_soft=self.cfg.admin_disk_soft,
             )
         return Policy(
-            uid, role, groups, group_ids,
+            uid, role, groups, group_ids, profile,
             nano_cpus=self.cfg.runner_nano_cpus,
             memory=self.cfg.runner_memory,
             disk_soft=self.cfg.disk_soft,
@@ -181,3 +196,51 @@ class RoleMapper:
             # deliberate act, not something that should happen by omission.
             raise AccessDenied(f"role {role!r} is not permitted to use runners")
         return self._policy(uid, role, groups, group_ids)
+
+    async def unknown_mapped_groups(self) -> list[str]:
+        """GROUP_MAP group names OWUI's roster does not currently contain
+        (ADR-0012 seam 6) -- a renamed or deleted OWUI group silently demotes
+        its members to the default profile, and this is how that becomes
+        visible at boot in seconds rather than as a mystery incident weeks
+        later. Empty (nothing to warn about) when GROUP_MAP is unset, so an
+        unconfigured deployment never pays for this extra OWUI round trip.
+
+        Best-effort, like orientation.check_dns_drift: any failure to fetch
+        or parse the roster is logged and answered as "nothing known to be
+        wrong" ([]), never raised -- a roster the orchestrator cannot
+        currently reach is a reason to skip the check, not to refuse every
+        runner or produce a false unknown-group warning.
+
+        UNVERIFIED against OWUI source: unlike GET /api/v1/users/{uid} above
+        (checked against the vendored open-webui routers/users.py), there is
+        no vendored copy of open-webui's admin group-list route in this repo
+        to verify GET /api/v1/groups/'s exact response shape against. This
+        assumes it returns a JSON list of objects each carrying a `name`
+        field, matching Open WebUI's documented admin group management API.
+        A wrong assumption fails safe: any unexpected shape or HTTP error
+        already falls into the "return []" path above.
+        """
+        if not self.cfg.group_map:
+            return []
+        try:
+            r = await self._client.get("/api/v1/groups/")
+            r.raise_for_status()
+            body = r.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            log.warning(
+                "could not verify GROUP_MAP against OWUI's group roster (%s); "
+                "skipping the unknown-group check for this boot", exc,
+            )
+            return []
+        if not isinstance(body, list):
+            log.warning(
+                "could not verify GROUP_MAP against OWUI's group roster: "
+                "unexpected response shape; skipping the unknown-group check"
+            )
+            return []
+        known = {
+            str(g["name"]) for g in body
+            if isinstance(g, dict) and g.get("name")
+        }
+        mapped = {group for group, _ in self.cfg.group_map}
+        return sorted(mapped - known)

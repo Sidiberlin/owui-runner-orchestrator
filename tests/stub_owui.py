@@ -6,6 +6,16 @@ Mirrors the real contract from open-webui/backend/open_webui/routers/users.py:
     -> UserActiveResponse: UserModel fields (incl. `role`) + groups + is_active
     unknown user -> 400 (NOT 404), matching OWUI's USER_NOT_FOUND
 
+    GET /api/v1/groups/             Depends(get_admin_user)
+    -> list[{id, name, ...}], the full OWUI group roster (ticket 04,
+    docs/adr/0012 seam 6). UNVERIFIED against OWUI source -- no vendored copy
+    of open-webui's admin group-list route exists in this repo, unlike the
+    per-user endpoint above -- this is app.roles.RoleMapper's own documented
+    assumption about the response shape, mirrored here so the same stub
+    exercises it. Returns exactly the two sample groups every other route on
+    this stub already hands out (_DEVS, _QA), so "known to OWUI" here means
+    "one of those two."
+
 Roles are resolved by prefix so every test can use a unique uid and never
 collide with another test's runner:
 
@@ -84,6 +94,8 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.headers.get("Authorization") != f"Bearer {TOKEN}":
             return self._send(401, {"detail": "Not authenticated"})
+        if self.path.rstrip("/") == "/api/v1/groups":
+            return self._send(200, [_DEVS, _QA])
         if not self.path.startswith("/api/v1/users/"):
             return self._send(404, {"detail": "no route"})
         uid = self.path.rsplit("/", 1)[-1]
