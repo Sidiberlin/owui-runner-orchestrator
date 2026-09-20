@@ -26,6 +26,16 @@ NETWORK = f"{NS}.network"
 # that was actually spawned under a mapped profile and would misreport its
 # resource/exec-timeout provenance to an operator or to ticket 07's sweeper.
 PROFILE = f"{NS}.profile"
+# v2 (ADR-0012, ticket 07): the idle timeout (seconds, as a plain number
+# string) this runner was created under. NOT re-derived from PROFILE +
+# live config at reconciliation time -- unlike memory (read back from the
+# container's own HostConfig) there is no Docker-native field to recover
+# this from, and an operator editing POLICY_<NAME>_IDLE_TIMEOUT and
+# restarting the orchestrator must not retroactively change the timeout an
+# ALREADY-RUNNING runner is reclaimed under -- the same "created under, not
+# a live recompute" guarantee PROFILE, ROLE and the resource limits already
+# get from their own durable labels / Docker HostConfig.
+IDLE_TIMEOUT = f"{NS}.idle-timeout"
 
 # Identifies anything this orchestrator owns, for list filters and reaping.
 MANAGED = f"{NS}.managed"
@@ -34,11 +44,14 @@ MANAGED_VALUE = "1"
 
 def build(uid: str, nonce: str, version: str, created_at: str,
           role: str = "user", network: str = "",
-          profile: str = "default") -> dict[str, str]:
+          profile: str = "default", idle_timeout: str = "") -> dict[str, str]:
     # profile's default ("default") is a plain literal, not imported from
     # config.DEFAULT_PROFILE_NAME, matching this module's existing style of
     # not depending on `config` (see ROLE's own "user" literal default) --
-    # keep the two in sync if either ever changes.
+    # keep the two in sync if either ever changes. idle_timeout has no such
+    # default: the caller always resolves a real value (ticket 05's Config
+    # always carries at least the default profile's), so an empty string
+    # here would only ever mean a bug upstream, not a legitimate omission.
     return {
         MANAGED: MANAGED_VALUE,
         UID: uid,
@@ -51,4 +64,5 @@ def build(uid: str, nonce: str, version: str, created_at: str,
         ROLE: role,
         NETWORK: network,
         PROFILE: profile,
+        IDLE_TIMEOUT: idle_timeout,
     }

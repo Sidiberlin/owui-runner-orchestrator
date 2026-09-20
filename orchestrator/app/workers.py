@@ -44,7 +44,10 @@ async def idle_worker(mgr: RunnerManager) -> None:
                     # doing so hands the user a 502 mid-call.
                     continue
                 idle_for = now - runner.last_seen
-                if idle_for < mgr.cfg.idle_timeout:
+                # v2 (ADR-0012, ticket 07): the timeout THIS runner was
+                # created under, not a single global -- survives restart via
+                # the durable label (runners.py's _label_idle_timeout).
+                if idle_for < runner.idle_timeout:
                     busy_past_idle.pop(runner.uid, None)
                     continue
                 try:

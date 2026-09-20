@@ -90,6 +90,12 @@ class Runner:
     # label, same as `role` above, so an orchestrator restart never quietly
     # relabels a mapped runner as default.
     profile: str = DEFAULT_PROFILE_NAME
+    # v2 (ADR-0012, ticket 07): the idle timeout (seconds) this runner was
+    # created under -- what the sweeper (workers.idle_worker) compares
+    # `last_seen` against, instead of a single global. Always explicitly
+    # set by the three places that construct a Runner (_spawn, _try_adopt,
+    # reconcile); the class default below is never actually relied on.
+    idle_timeout: float = 0.0
     # C7: set when this container replaced a torn-down one, so the proxy can
     # explain a stale process id instead of passing through a bare 404.
     replaced_reason: str | None = None
@@ -223,6 +229,7 @@ class RunnerManager:
                 memory=int((data.get("HostConfig") or {}).get("Memory") or 0),
                 role=lbls.get(L.ROLE, "user"),
                 profile=lbls.get(L.PROFILE, DEFAULT_PROFILE_NAME),
+                idle_timeout=self._label_idle_timeout(lbls),
             )
             adopted += 1
         log.info("reconcile: adopted %d, reaped %d", adopted, reaped)
@@ -362,6 +369,9 @@ class RunnerManager:
         # DEFAULT_EGRESS_STANCE by construction (ticket 03), so this is a
         # no-op for a caller with no resolved profile too.
         egress = profile.egress if profile else DEFAULT_EGRESS_STANCE
+        # v2 (ticket 07): same reasoning -- the default profile's
+        # idle_timeout equals cfg.idle_timeout by construction (ticket 03).
+        idle_timeout = profile.idle_timeout if profile else self.cfg.idle_timeout
         profile_name = profile.name if profile else DEFAULT_PROFILE_NAME
         role = policy.role if policy else "user"
         lock = await self._lock_for(uid)
@@ -382,6 +392,7 @@ class RunnerManager:
             self._admit(uid, mem)
             return await self._spawn(
                 uid, nano, mem, role, image, exec_timeout, profile_name, egress,
+                idle_timeout,
             )
 
     # --- internals ------------------------------------------------------------
@@ -435,10 +446,29 @@ class RunnerManager:
             memory=int((data.get("HostConfig") or {}).get("Memory") or 0),
             role=lbls.get(L.ROLE, "user"),
             profile=lbls.get(L.PROFILE, DEFAULT_PROFILE_NAME),
+            idle_timeout=self._label_idle_timeout(lbls),
         )
         self._runners[uid] = runner
         log.info("adopted existing runner %s for %s", name, uid)
         return runner
+
+    def _label_idle_timeout(self, lbls: dict) -> float:
+        """The idle timeout label (ticket 07), tolerant of a pre-v2 runner
+        (no such label -- adopted from before this ticket) or a corrupted
+        one: either falls back to the current global default rather than
+        raising reconcile/adopt entirely, matching PROFILE's and ROLE's own
+        tolerance for a missing label."""
+        raw = lbls.get(L.IDLE_TIMEOUT)
+        if not raw:
+            return self.cfg.idle_timeout
+        try:
+            return float(raw)
+        except ValueError:
+            log.warning(
+                "could not parse %s label %r; using the global idle timeout",
+                L.IDLE_TIMEOUT, raw,
+            )
+            return self.cfg.idle_timeout
 
     def _runner_env(self, key: str, exec_timeout: float, egress: str) -> list[str]:
         env = {
@@ -472,7 +502,7 @@ class RunnerManager:
 
     async def _spawn(self, uid: str, nano_cpus: int, memory: int, role: str,
                       image: str, exec_timeout: float, profile_name: str,
-                      egress: str) -> Runner:
+                      egress: str, idle_timeout: float) -> Runner:
         s_uid = safe_uid(uid)
         name = f"runner-{s_uid}"
         nonce = keys.mint_nonce()
@@ -488,7 +518,7 @@ class RunnerManager:
                 uid, nonce, self.cfg.runner_version,
                 datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 role=role, network=self.cfg.runners_network,
-                profile=profile_name,
+                profile=profile_name, idle_timeout=str(idle_timeout),
             ),
             "Env": self._runner_env(key, exec_timeout, egress),
             "HostConfig": {
@@ -549,7 +579,7 @@ class RunnerManager:
         runner = Runner(
             uid=uid, safe_uid=s_uid, container_id=data["Id"], name=name,
             nonce=nonce, key=key, port=self.cfg.runner_port, role=role,
-            memory=memory, profile=profile_name,
+            memory=memory, profile=profile_name, idle_timeout=idle_timeout,
             # Kept for the life of this container: any process id from the
             # previous incarnation stays invalid for as long as this one lives.
             replaced_reason=prior[0] if prior else None,

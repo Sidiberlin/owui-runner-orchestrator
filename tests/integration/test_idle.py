@@ -10,7 +10,7 @@ import time
 
 import pytest
 
-from conftest import container_exists, runner_name_for
+from conftest import container_exists, inspect, runner_name_for
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
 
@@ -18,6 +18,12 @@ pytestmark = [pytest.mark.integration, pytest.mark.slow]
 IDLE_TIMEOUT = 60
 SWEEP = 5
 SETTLE = IDLE_TIMEOUT + SWEEP * 3
+
+# env.test: POLICY_HEAVY_IDLE_TIMEOUT=15s -- a profile-specific timeout much
+# shorter than the global above, chosen so ticket 07's per-runner comparison
+# can be proven within one settle window rather than the full global one.
+HEAVY_IDLE_TIMEOUT = 15
+HEAVY_SETTLE = HEAVY_IDLE_TIMEOUT + SWEEP * 3
 
 
 def _gone_within(name: str, seconds: float) -> bool:
@@ -84,3 +90,48 @@ def test_teardown_reason_is_recorded(api, stack, uid, cleanup_runners):
     rows = api.get("/_orch/runners", headers=stack.orch_headers()).json()
     row = next(x for x in rows if x["uid"] == uid)
     assert row["replaced_reason"] and "idle" in row["replaced_reason"].lower()
+
+
+# ---------------------------------------------------------------------------
+# Ticket 07 (v2.0 group policy profiles, docs/adr/0012): the sweeper compares
+# each runner against the idle timeout it was created under, not one global
+# value. env.test maps GROUP_MAP=ops:heavy (POLICY_HEAVY_IDLE_TIMEOUT=15s) to
+# a group only a uid containing "opsgroup" ever carries -- see
+# test_lifecycle.py's own ticket-05 section for why this cannot perturb any
+# other test, including every test above in this same file (all use the
+# plain `uid` fixture, which resolves to the default/global 60s).
+# ---------------------------------------------------------------------------
+def test_a_shorter_profile_timeout_reclaims_while_the_default_survives(
+        api, stack, cleanup_runners):
+    """Demoable exactly as the ticket describes: two runners on different
+    timeouts, the shorter one reclaimed, the longer one still up at the same
+    point in time (HEAVY_SETTLE=30s is well short of the default's 60s)."""
+    default_uid = "u-plain-idle-check"
+    heavy_uid = "u-opsgroup-idle"
+    cleanup_runners.extend([default_uid, heavy_uid])
+    assert api.get("/system", headers=stack.user_headers(default_uid)).status_code == 200
+    assert api.get("/system", headers=stack.user_headers(heavy_uid)).status_code == 200
+
+    assert _gone_within(runner_name_for(heavy_uid), HEAVY_SETTLE), \
+        "the shorter-timeout profile's runner was not reclaimed"
+    assert container_exists(runner_name_for(default_uid)), \
+        "a runner on the longer default timeout was reclaimed early"
+
+
+def test_a_mapped_profiles_idle_timeout_survives_restart_and_adoption(
+        api, stack, cleanup_runners):
+    """Mirrors the ticket-05 profile-label restart test, but proves the
+    NUMERIC idle timeout specifically: if reconciliation lost it and fell
+    back to the 60s global, this runner would still be alive at
+    HEAVY_SETTLE."""
+    heavy_uid = "u-opsgroup-idle-restart"
+    cleanup_runners.append(heavy_uid)
+    assert api.get("/system", headers=stack.user_headers(heavy_uid)).status_code == 200
+    name = runner_name_for(heavy_uid)
+    before = inspect(name, "{{.Id}}")
+
+    stack.restart_orchestrator()
+
+    assert inspect(name, "{{.Id}}") == before, "runner was respawned"
+    assert _gone_within(name, HEAVY_SETTLE), \
+        "reconciliation did not restore the profile's own idle timeout"
