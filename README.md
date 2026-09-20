@@ -457,6 +457,97 @@ Bump `RUNNER_VERSION`. Reconciliation reaps every runner carrying the old
 version on the next restart instead of orphaning them. User workspaces are
 named volumes and survive.
 
+## Policy profiles
+
+v2 (ADR-0012). Every runner used to get identical settings from the global
+env vars above — the only tuning available was "change it for everybody".
+Policy profiles let an operator tune **per OWUI group** instead, with no
+redeploy: granting a group better limits is a `.env` edit, not a code
+change.
+
+**Policy profile**: a named bundle of exactly six settings — cpus, memory,
+idle timeout, exec timeout, image, egress stance — declared as
+`POLICY_<NAME>_<FIELD>` vars (`.env.example` has the full convention).
+Every field a profile leaves unset inherits the matching global knob, so a
+profile only ever states what makes it different. Profiles **tune; they
+never gate** — the role check and the Q5 allowlist above still decide who
+may have a runner at all, unchanged.
+
+**Groups (OWUI)**: admin-managed user collections in Open WebUI. The
+per-user admin payload the role mapper already fetches for every request
+carries each account's group membership at no extra API cost — group
+resolution needs no additional OWUI round trip. Membership never grants
+access by itself; it only selects a profile.
+
+**`GROUP_MAP`**: the ordered `groupname:profile` list mapping OWUI group
+names to policy profiles. At request time the caller's groups are checked
+against it **left to right — the first entry whose group they belong to
+wins.** A user in several mapped groups gets the profile of whichever
+mapping entry comes first, not whichever group happens to be listed first
+on their own account.
+
+**Default equals today.** A user in no group, in an unmapped group, or in a
+group `GROUP_MAP` names that no longer matches any of their current OWUI
+groups, all resolve to the implicit **`default`** profile — which is
+defined to be today's global knobs verbatim, nothing re-specified. This
+makes the additive promise a code guarantee, not a convention to remember:
+deploying with `GROUP_MAP` blank is a byte-for-byte no-op, enforced by a
+dedicated regression test (`tests/integration/test_noop_guard.py`).
+`POLICY_DEFAULT_*` is reserved and refused at startup — you cannot
+redefine what "default" means.
+
+**The group-rename caveat.** Matching is by group **name**, not id, chosen
+for config readability over rename-stability: renaming an OWUI group
+silently demotes its members to the default profile, since the old name in
+`GROUP_MAP` simply stops matching anything. Two things catch this fast
+rather than letting it become a mystery incident: a loud boot-log warning
+for every `GROUP_MAP` group name Open WebUI's roster does not currently
+contain, and the same warning re-checked live on every `GET /_orch/status`
+call (`unknown_mapped_groups`), so a rename that happens mid-uptime shows
+up on the next status check, not only at the last restart.
+
+### Worked example
+
+Add to `.env`:
+
+```
+POLICY_HEAVY_CPUS=4
+POLICY_HEAVY_MEMORY=4g
+GROUP_MAP=data-science:heavy
+```
+
+Everything else about the `heavy` profile — idle timeout, exec timeout,
+image, egress stance — inherits the global default, since only cpus and
+memory were stated. On the next boot the orchestrator logs the fully
+resolved table (one line per profile, effective values after inheritance —
+read this instead of re-deriving it from env vars in your head):
+
+```
+policy profile default      cpus=1.50 memory=768MiB idle=1800s exec=120s image=owui-agent-runner:dev egress=BLOCKED
+policy profile heavy        cpus=4.00 memory=4096MiB idle=1800s exec=120s image=owui-agent-runner:dev egress=BLOCKED
+```
+
+A member of OWUI's `data-science` group now gets a 4-cpu, 4 GiB runner;
+everyone else keeps exactly what they had before this section existed.
+Confirm it took effect any time via `GET /_orch/status`
+(`policy_profiles` mirrors this same table, plus `unknown_mapped_groups`
+for the rename caveat above) or `GET /_orch/runners` (each row's
+`profile` field, restart-adopted runners included).
+
+### What each field actually changes
+
+| Field | Applied | Notes |
+|---|---|---|
+| `CPUS` / `MEMORY` | Container create (`NanoCpus`/`Memory`) | For a MAPPED (non-default) profile these fully replace the role-derived value; the default profile still honours `ADMIN_RUNNER_*` exactly as before profiles existed. |
+| `IDLE_TIMEOUT` | The sweeper compares each runner against the value it was created under | Survives an orchestrator restart via a durable label, same as the profile name itself. |
+| `EXEC_TIMEOUT` | `OPEN_TERMINAL_EXECUTE_TIMEOUT` in the runner's own env | Governs how long a `/execute` tool call is allowed to run. |
+| `IMAGE` | Container create (`Image`) | Every profile points at the same tag today; the field exists so a future variant image is a config change, not a schema migration. |
+| `EGRESS` | `SANDBOX_EGRESS` (data channel) + the AGENTS.md prose (see "What the agent sees" below) | An explanation to the agent, not a hole in the topology — zero real egress holds by effect for every profile regardless of this value; only the shim's fail-fast-vs-real-attempt timing differs. |
+
+A profile change takes effect on a user's **next** runner only — never
+retroactively on one already running, the same rule role-derived limits
+already followed before profiles existed.
+
 ## What the agent sees
 
 The driving agent is the LLM in the OWUI chat, not a process inside the
@@ -472,6 +563,12 @@ SANDBOX_MODE=air-gapped
 SANDBOX_EGRESS=BLOCKED
 SANDBOX_INTERNAL_SERVICES=devguard-api:8080=package proxy: pip/npm packages, malware-checked
 ```
+
+`SANDBOX_EGRESS` shown above is the default profile's value; a runner
+spawned under a mapped Policy profile (see "## Policy profiles") reports
+that profile's own `EGRESS` stance instead — `SANDBOX_MODE` stays the
+constant `air-gapped` either way, since the network topology itself is
+single and unchanged across profiles.
 
 `SANDBOX_INTERNAL_SERVICES` is `name:port=description` pairs, comma-joined,
 one entry per service actually reachable on this deployment — empty unless

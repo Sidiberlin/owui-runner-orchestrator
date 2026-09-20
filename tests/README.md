@@ -42,6 +42,7 @@ operator's `.env`. It never touches a production stack on the same host.
 | `integration/test_resources.py` | brief test (b) in the cgroup and by effect |
 | `integration/test_quota.py` | N4 accounting; N14 cache survives restart |
 | `integration/test_noop_guard.py` | ADR-0012 — empty `GROUP_MAP`/no `POLICY_*` is byte-for-byte v1: exact env, resources, image, security posture, network and idle timeout, for user and admin alike |
+| `unit/test_readme_env_docs.py` | doc-drift guard: README's "What the agent sees" and "Policy profiles" sections, and `.env.example`'s `POLICY_<NAME>_*`/`GROUP_MAP` documentation, must match what the code actually parses and emits — including the worked profile example's boot-log output, run through the real parser rather than hand-typed twice |
 
 ## Stub OWUI
 
