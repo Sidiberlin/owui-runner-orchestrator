@@ -728,3 +728,61 @@ based test.
   dict") rather than requiring a full `Config`, so its unit test needs no
   Docker/FastAPI/real-Config ceremony to exercise the one field it actually
   reads.
+
+### Ticket 09 — config surface documentation
+- Commit: `88cd82a` docs(v2): 09 config surface documentation — pushed: no
+  (unpushed: `88cd82a`; `git push origin main` failed with "Invalid
+  username or token", the documented broken-push-auth state, not retried)
+- What: pure documentation, no orchestrator source touched (confirmed via
+  `git diff --stat` — this is the first ticket in the chain with zero
+  `orchestrator/app/*.py` changes). `.env.example` gains a `## Policy
+  profiles (v2, ADR-0012)` block (the six-field convention, GROUP_MAP's
+  first-match/default-equals-today/reserved-`default` rules, a commented-out
+  worked example) placed next to the existing per-role policy section it
+  widens. `README.md` gains a `## Policy profiles` section — what a profile
+  is, how groups select one, first-match priority, default-equals-today, the
+  group-rename caveat (and how it's caught: the boot warning plus the same
+  check re-run live on every `/status` call, ticket 08), a worked two-profile
+  example with its real boot-log output, and a table of what each of the six
+  fields actually changes and where — plus a short cross-reference in the
+  pre-existing "What the agent sees" section noting `SANDBOX_EGRESS` is now
+  per-profile. Glossary terms ("Policy profile", "GROUP_MAP", "Groups
+  (OWUI)") used exactly as `CONTEXT.md` defines them.
+- The doc-drift guard (`tests/unit/test_readme_env_docs.py`, prior art
+  extended, not a new file): the worked example is the load-bearing test —
+  it reads the example's OWN `.env` lines and its OWN claimed boot-log
+  output straight out of the README section (never re-typed in the test),
+  runs the `.env` lines through the real `build_profiles()`/
+  `parse_group_map()` (with the six global defaults ALSO read live from
+  `.env.example` rather than hardcoded, so a future default change is
+  caught too, not just a profile-parsing change), and asserts the result is
+  byte-for-byte the boot-log block README shows. A hand-typed example that
+  silently drifted from the actual parser's output — the exact failure mode
+  this ticket exists to prevent — fails this test, not just a human
+  reviewer. Two smaller checks: the profiles section exists and uses the
+  three glossary terms plus first-match/default/rename language; `.env.example`
+  contains `GROUP_MAP=` and the `POLICY_<NAME>_<FIELD>` convention text.
+  `tests/README.md` gained the one missing row for this file (pre-existing,
+  never listed before — now doing substantial v2 doc-guarding work).
+- Suite: full batched re-run, every batch clean (nothing but docs/tests
+  changed, so this was a low-risk confirmation, not a real regression
+  hunt): unit 144/144 (+3 new); smoke `-k noop_guard` 3/3; batch A (auth/
+  denylist/devguard/discovery/egress/isolation/orientation/lifecycle/
+  ownership/persistence/proxy/quota) 132 passed/12 skipped, 567s; batch B
+  (idle/roles/noop_guard) 31/31, 628s; `test_resources.py` +
+  `test_shims.py` 10/10. `git diff --stat`: exactly `.env.example`,
+  `README.md`, `tests/README.md`, `tests/unit/test_readme_env_docs.py`.
+- Notes: Judgment call — placed `## Policy profiles` right before "## What
+  the agent sees" (rather than, say, appended at the very end) since egress
+  stance is the one profile field that section already partially describes,
+  and readers reaching "what the agent sees" benefit from having just read
+  why the stance might not be the global default. Judgment call — the
+  `.env.example` block shows its worked example commented out (this file
+  has no existing "live but inert example" convention to follow, since
+  every other var in it is an active default) rather than as a real,
+  uncommented `POLICY_HEAVY_*` — declaring a real extra profile by default
+  would contradict "default equals today" for anyone who just copies the
+  file. Judgment call — chose `data-science:heavy` / 4 cpu / 4g as the
+  worked example's concrete numbers: arbitrary, but a `data-science`-flavoured
+  example matches the spec's own "an evaluation group" / "a heavy user"
+  motivating language rather than an abstract `foo`/`bar`.
