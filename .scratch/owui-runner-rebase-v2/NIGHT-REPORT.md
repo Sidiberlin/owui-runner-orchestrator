@@ -382,3 +382,150 @@ if a ticket's diff does not touch anything `test_resources.py` exercises
 call), treat its already-established ticket-01/02 timeout-margin tolerance
 as covering an unverified run here too, log it plainly, and do not burn
 further retries chasing it alone.
+
+**Infra finding during ticket 05, retroactively relevant to tickets 03-04
+too: `NO_BUILD=1` was silently running a STALE `owui-orchestrator:dev`
+image all session.** `docker image inspect owui-orchestrator:dev` showed a
+build timestamp from BEFORE this session's work began (2026-09-19 07:04),
+and `run.sh`'s `build_if_stale()` only checks whether the image *exists*
+under `NO_BUILD=1`, never whether it is newer than the source — so every
+docker-container-based test this session (tickets 03 and 04's `-k roles`/
+`-k noop_guard`/batch runs) was exercising OLD code inside the live
+orchestrator container. This did NOT invalidate tickets 03/04's own
+correctness verification: their genuinely new logic (`build_profiles`,
+`parse_group_map`, `resolve_profile`, `RoleMapper._policy`/
+`unknown_mapped_groups`) was verified either by direct unit import (no
+Docker at all) or by `tests/integration/test_roles.py`'s local-stub-
+subprocess tests (`RoleMapper` run directly against `stub_owui.py` as a host
+process — never through the docker orchestrator image either). What it DID
+mean: the ticket-03 boot-time profile-table log and the ticket-04
+`unknown_mapped_groups()` boot warning were never actually confirmed
+running live, and ticket 05's own spawn-path changes (which only exist
+inside `RunnerManager`, reachable solely through the real container) could
+not be verified at all until this was fixed — which is how it surfaced: a
+brand-new ticket-05 test asserting the "heavy" profile's resources failed
+with the DEFAULT profile's values instead.
+
+Fixed two things: (1) manually rebuilt `owui-orchestrator:dev` (`docker
+buildx build --builder owui-bk --load -t owui-orchestrator:dev
+orchestrator`, ~3s — pip layers cache-hit, only the `app/` COPY layer was
+new) so it now carries tickets 03-05's cumulative source; `NO_BUILD=1` from
+here on correctly reuses this fresh build since nothing changed on disk
+between reuses. (2) A second, independent, ALSO-real bug this uncovered:
+even with a fresh image, `docker-compose.yml`'s `orchestrator` service
+`environment:` block statically enumerates every var name, and
+`POLICY_<NAME>_*`/`GROUP_MAP` were never added to it — so `tests/env.test`
+declaring them was not enough; compose never injected them into the
+container at all (`Config.from_env()` saw `GROUP_MAP` unset regardless of
+what env.test said). `POLICY_<NAME>_*` is open-ended by design (an operator
+adding a profile must be a `.env` edit, never a `docker-compose.yml` edit
+per the spec's own "not a redeploy" promise), so a static `environment:`
+list can never enumerate it. Fix: `docker-compose.yml`'s orchestrator
+service now also declares `env_file: - ${ENV_FILE_NAME:-.env}` (bulk-loads
+whichever file compose's substitution is already pointed at — `.env` by
+default for a real deployment, or `tests/env.test` for the suite, which now
+self-declares `ENV_FILE_NAME=tests/env.test`, resolved relative to the
+compose project root since `conftest.py` always invokes `docker compose`
+with `cwd=ROOT`); explicit `environment:` entries still win on conflict, so
+this only ever adds coverage `environment:` cannot express. `GROUP_MAP`
+itself also got an explicit `environment:` line (it is a single fixed name,
+so it follows the existing per-var convention like every other knob).
+Verified live post-fix: brought the test stack up standalone and read
+`docker logs` directly — `policy profile default ... policy profile heavy
+...` (ticket 03's boot table) and the `unknown_mapped_groups()` warning
+path both fire exactly as designed. Re-ran the full batched suite
+(identical batching to tickets 03/04) against the corrected image+compose:
+every batch clean, **`integration/test_resources.py` included — 5/5, no
+retry needed** (contrast tickets 01/02's repeated flakes there; today's host
+load was simply light: `uptime` 0.53/0.59/0.51 at the time). This is the
+first genuinely complete, image-fresh full-suite confirmation since ticket
+02 — tickets 03 and 04 remain accepted on their own (correct, if
+Docker-container-blind for two specific checks) verification; no code
+change resulted from this retroactive re-check, only added confidence.
+**Protocol addendum for tickets 06-10:** if a ticket's own tests need to
+observe something only the LIVE orchestrator container does (a boot log
+line, a spawn-time value, anything `main.py`/`runners.py`-side), sanity-check
+`docker image inspect owui-orchestrator:dev --format '{{.Created}}'` against
+`date -u` before trusting a `NO_BUILD=1` green run — if the image predates
+the ticket's own edits, rebuild it once (`docker buildx build --builder
+owui-bk --load -t owui-orchestrator:dev orchestrator`, seconds not minutes,
+source-only layers) before drawing any conclusion from a docker-container-
+based test.
+
+### Ticket 05 — spawn integration: resources, image and exec timeout per profile
+- Commit: `2acd1e7` feat(v2): 05 spawn integration - resources, image and
+  exec timeout per profile — pushed: no (unpushed: `2acd1e7`; `git push
+  origin main` failed with "Invalid username or token", the documented
+  broken-push-auth state, not retried)
+- What: the first user-visible effect. `orchestrator/app/labels.py` gains a
+  `PROFILE` label (durable, same reasoning as `ROLE`). `orchestrator/app/
+  runners.py`: `Runner` gains a `profile` field; `RunnerManager.get_or_spawn()`
+  computes the effective cpus/memory/image/exec_timeout from `policy.profile`
+  and threads them through `_spawn()`, `_runner_env()` (exec timeout now a
+  parameter, `round()`ed to the nearest second, not global `cfg.
+  ot_execute_timeout`), `reconcile()` and `_try_adopt()` (both restore
+  `profile` from the label, defaulting to `DEFAULT_PROFILE_NAME` for a
+  pre-v2 runner with no such label). The precise rule, and the reason it is
+  not simply "always use policy.profile's numbers": cpus/memory stay
+  ROLE-derived (`policy.nano_cpus`/`.memory`, admin vs user, exactly as v1)
+  whenever the resolved profile is the implicit default; a REAL mapped
+  profile's cpus/memory fully replace the role-derived ones instead, since a
+  named profile is meant to apply uniformly to whoever is in the mapped
+  group, admin or not. Image and exec timeout are simpler: v1 never
+  role-differentiated either one, so they always come from the resolved
+  profile — safe by construction because the default profile's image/
+  exec_timeout equal `cfg.runner_image`/`cfg.ot_execute_timeout` exactly
+  (ticket 03). `docker-compose.yml` and `tests/env.test` also changed — see
+  the infra finding above; that fix is a hard prerequisite for this ticket's
+  own tests to mean anything (without it, GROUP_MAP/POLICY_* never reach the
+  live container regardless of what this ticket's spawn-path code does).
+- Suite: full batched re-run against the corrected image+compose (see infra
+  note) — **every batch clean, including a full, un-flaky
+  `test_resources.py` (5/5)**: unit 135/135; `-k noop_guard` 3/3; `-k roles`
+  23/23; batch A (auth/denylist/devguard/discovery/egress/idle/isolation)
+  69 passed/12 skipped; batch B1 (lifecycle/orientation/ownership/
+  persistence) 26/26 (includes this ticket's 4 new `test_lifecycle.py`
+  tests); batch B2 (proxy/quota + incidental matches) 36 passed/2 skipped;
+  `test_shims.py` 5/5; `test_resources.py` 5/5. `git diff --stat`: exactly
+  `orchestrator/app/labels.py`, `orchestrator/app/runners.py`, `docker-
+  compose.yml`, `tests/env.test`, `tests/integration/test_lifecycle.py`,
+  `tests/stub_owui.py`.
+- Tests added (`tests/integration/test_lifecycle.py`, prior art per the
+  ticket): a new group ("ops") only a uid containing "opsgroup" ever carries
+  (`tests/stub_owui.py groups_for`) backs `env.test`'s
+  `GROUP_MAP=ops:heavy` + `POLICY_HEAVY_*` — chosen specifically so no
+  pre-existing test's uid is perturbed (every other test's uid resolves to
+  "devs" or no group, neither of which this mapping matches), which is what
+  keeps ticket 01's no-op guard meaningful in the same stack as these tests.
+  - `test_a_mapped_profile_produces_a_genuinely_different_container`: two
+    users, default vs "heavy", genuinely different NanoCpus/Memory/exec-
+    timeout-env/profile-label, proven via the Docker API.
+  - `test_admin_limits_are_untouched_when_no_profile_matches`: an admin
+    outside the mapped group keeps its v1 role-derived memory and resolves
+    to the "default" profile label — the flip side of the ticket's own
+    checklist, phrased against a stack that (unlike the no-op guard's) has a
+    non-empty GROUP_MAP/POLICY_* configured.
+  - `test_profile_survives_an_orchestrator_restart`: mirrors the existing
+    A4 restart-adoption test, asserting the profile label specifically.
+  - `test_a_mapped_profiles_memory_is_what_the_budget_sees`: `/_orch/status`
+    `committed_memory_mb` reflects the heavy profile's 200 MiB, not the
+    default's 320 MiB, proving profile memory flows through the same
+    admission accounting the Budget reads. (Not a refusal test: doing that
+    without a shared `RUNNER_MEMORY_BUDGET` change that would break every
+    other test's default-profile spawns was not worth the blast radius for
+    what is fundamentally a wiring check — `_admit(uid, mem)` and `_spawn`
+    already use the identical `mem` variable, so this is the same guarantee
+    at lower risk.)
+- Notes: Judgment call — the resource-selection rule (role-tier baseline for
+  default, full profile override otherwise) is the one design that
+  satisfies BOTH "empty GROUP_MAP is byte-for-byte" (ticket 01) AND "admin's
+  larger limits behave as today when no profile matches" (this ticket's own
+  checklist) simultaneously; a simpler "always use profile.nano_cpus/memory"
+  would silently demote every admin whose group never maps, since the
+  default profile is built from the plain global, not the admin-adjusted
+  one (ticket 03). Judgment call — did not attempt a real `BudgetExhausted`
+  (429) test keyed to profile memory specifically; see above. Judgment call
+  — `OPEN_TERMINAL_EXECUTE_TIMEOUT` uses `round()` not `int()` on the
+  resolved exec_timeout, so a profile declaring a sub-second value lands on
+  the nearest whole second rather than always truncating down; the default
+  case (`float(120)`) is unaffected either way.
