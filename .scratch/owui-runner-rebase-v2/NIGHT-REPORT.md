@@ -662,3 +662,69 @@ based test.
   direction, and this way the default-profile comparison point (30s) stays
   comfortably under the default's own 60s without needing a second, even
   longer wait.
+
+### Ticket 08 — observability: profile on the status surface
+- Commit: `d2a3691` feat(v2): 08 status surface profile observability —
+  pushed: no (unpushed: `d2a3691`; `git push origin main` failed with
+  "Invalid username or token", the documented broken-push-auth state, not
+  retried)
+- What: `orchestrator/app/main.py`'s `/_orch/status` gains
+  `policy_profiles` (the resolved table, one entry per profile, same fields
+  the boot log prints: cpus/memory_mb/idle_timeout_s/exec_timeout_s/image/
+  egress) via a new pure `_policy_profiles_payload(cfg)` helper, and
+  `unknown_mapped_groups` (a live `await mapper.unknown_mapped_groups()`
+  call on every request, NOT a boot-time cache — a rename shows up on the
+  next `/status` call, not only in the boot log, matching the ticket's own
+  "whoever is looking at the fleet right now" framing). `/_orch/runners`
+  gains `"profile": r.profile` per row, restart-adopted runners included
+  (already correctly restored by ticket 05's reconciliation fix; this
+  ticket only surfaces it). New `_mapper()` accessor added alongside the
+  existing `_cfg()`/`_mgr()` pattern. No secret or token in either payload —
+  every added field is a resource number, an image tag, or a group/profile
+  name, same sensitivity class as what was already there.
+- Suite: full batched re-run, every batch clean: unit 141/141 (+2 new);
+  targeted (`status`/`runner_list`/`noop_guard`/`roles`) 32/32; batch A
+  (auth/denylist/discovery/egress/idle/isolation/orientation) 76 passed/3
+  skipped, 668s (0:11:08 — this particular batch happened to cross the
+  10-minute mark; the harness auto-moved it to background mid-run rather
+  than killing it, and it finished clean, so no "system is running low on
+  memory" retry was needed this ticket); batch B
+  (lifecycle/ownership/persistence/proxy/quota/devguard) 69 passed/12
+  skipped; `test_resources.py` + `test_shims.py` 10/10. `git diff --stat`:
+  exactly `orchestrator/app/main.py`, `tests/env.test`,
+  `tests/integration/test_lifecycle.py`, `tests/stub_owui.py`,
+  `tests/unit/test_config.py`.
+- Also fixed a latent test-fixture inconsistency this ticket's own testing
+  needs surfaced: `tests/stub_owui.py`'s `/api/v1/groups/` roster route
+  (added ticket 04) only ever returned `[_DEVS, _QA]`, so the "ops" group
+  every ticket-05-through-07 test's `POLICY_HEAVY_*`/`GROUP_MAP=ops:heavy`
+  already relies on was being reported as "unknown to OWUI" at every boot
+  since ticket 04 landed — harmless (the check is best-effort/advisory,
+  ticket 04) but factually wrong, since "ops" is a real, working group in
+  this test fixture. Fixed by adding `_OPS` to that route's response; added
+  a genuinely-unknown `ghost-team:heavy` GROUP_MAP entry (a group no uid's
+  membership or the roster route ever returns) so ticket 08 still has a
+  real case to test `unknown_mapped_groups` surfacing on `/status` against.
+- Tests added:
+  - `tests/unit/test_config.py`: `_policy_profiles_payload()` directly
+    against a minimal fake config object (the function only reads
+    `.profiles`) — full-field-override shape and units, and the
+    no-POLICY_*-configured case (still one "default" entry, matching
+    `build_profiles`' own no-op guarantee from ticket 03).
+  - `tests/integration/test_lifecycle.py`: `/_orch/status`'s
+    `policy_profiles` matches both the default and "heavy" profiles'
+    exact hand-written values (env.test); `unknown_mapped_groups ==
+    ["ghost-team"]`; `/_orch/runners`' `profile` field for a freshly
+    spawned heavy-profile runner and for one restart-adopted at the
+    default profile.
+- Notes: Judgment call — `unknown_mapped_groups()` is called live on every
+  `/status` request rather than cached from boot: it is already designed
+  best-effort/non-blocking (ticket 04) specifically so an extra OWUI round
+  trip on an infrequent admin-diagnostic endpoint is an acceptable cost for
+  staying current, and a cached boot-time snapshot would silently go stale
+  the moment an operator renames a group mid-uptime — exactly the scenario
+  this field exists to catch. Judgment call — `_policy_profiles_payload`
+  takes a bare `cfg` (structurally typed to "anything with a `.profiles`
+  dict") rather than requiring a full `Config`, so its unit test needs no
+  Docker/FastAPI/real-Config ceremony to exercise the one field it actually
+  reads.
